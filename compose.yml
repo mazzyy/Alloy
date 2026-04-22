@@ -1,0 +1,121 @@
+# Alloy — dev stack.
+#
+#   docker compose up -d db redis          # data-plane first
+#   docker compose up api web              # app containers (with reload)
+#   docker compose exec api alembic upgrade head
+#
+# Prod is deployed through a different path (roadmap §7: Vercel for web,
+# Railway / Azure Container Apps for api), so this file is dev-only. No Traefik,
+# no Adminer, no email container.
+
+name: alloy
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-alloy}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-alloy}
+      POSTGRES_DB: ${POSTGRES_DB:-alloy}
+    volumes:
+      - alloy-db-data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-alloy} -d ${POSTGRES_DB:-alloy}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 15s
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "allkeys-lru"]
+    volumes:
+      - alloy-redis-data:/data
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build:
+      context: ./apps/api
+      dockerfile: Dockerfile
+    # Dev override: hot-reload uvicorn instead of prod Gunicorn.
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+    env_file: [.env]
+    environment:
+      ENVIRONMENT: local
+      POSTGRES_SERVER: db
+      POSTGRES_PORT: 5432
+      REDIS_URL: redis://redis:6379/0
+      FRONTEND_HOST: http://localhost:5173
+    volumes:
+      - ./apps/api/app:/app/app:ro
+      - ./apps/api/alembic:/app/alembic:ro
+    depends_on:
+      db: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health').read()",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  worker:
+    build:
+      context: ./apps/api
+      dockerfile: Dockerfile
+    command: ["arq", "app.workers.arq_worker.WorkerSettings"]
+    env_file: [.env]
+    environment:
+      ENVIRONMENT: local
+      POSTGRES_SERVER: db
+      POSTGRES_PORT: 5432
+      REDIS_URL: redis://redis:6379/0
+    volumes:
+      - ./apps/api/app:/app/app:ro
+    depends_on:
+      redis: { condition: service_healthy }
+      db: { condition: service_healthy }
+
+  web:
+    build:
+      context: ./apps/web
+      dockerfile: Dockerfile
+    # Dev: run Vite inside the container so hot reload works out of the box.
+    # Override target stage to the builder, which has pnpm + node available.
+    command: ["pnpm", "dev", "--host", "0.0.0.0"]
+    environment:
+      VITE_API_URL: http://api:8000
+      VITE_CLERK_PUBLISHABLE_KEY: ${VITE_CLERK_PUBLISHABLE_KEY:-}
+    volumes:
+      - ./apps/web:/app
+      - web-node-modules:/app/node_modules
+    ports:
+      - "5173:5173"
+    depends_on:
+      api: { condition: service_started }
+    # Note: the builder stage (Node + pnpm + source) is targeted via
+    # compose.override.yml so `pnpm dev` works with hot reload. The nginx
+    # runtime stage is for prod images only.
+
+volumes:
+  alloy-db-data: {}
+  alloy-redis-data: {}
+  web-node-modules: {}

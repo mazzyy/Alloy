@@ -1,0 +1,51 @@
+# Env + secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Node
+node_modules/
+dist/
+build/
+.vite/
+.turbo/
+*.tsbuildinfo
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+
+# Tooling
+.langfuse/
+.playwright/
+playwright-report/
+test-results/
+
+# Generated openapi clients keep committed copy but ignore intermediates
+apps/web/src/client/openapi.json
+
+# Logs
+*.log
+logs/
+
+# Docker
+.docker/

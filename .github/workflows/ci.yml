@@ -1,0 +1,152 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.12"
+  NODE_VERSION: "22"
+
+jobs:
+  # ─── Backend: ruff + mypy + pytest ─────────────────────────────────
+  api:
+    name: api · ruff + mypy + pytest
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: alloy
+          POSTGRES_PASSWORD: alloy
+          POSTGRES_DB: alloy
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U alloy -d alloy"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+    defaults:
+      run:
+        working-directory: apps/api
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "latest"
+          enable-cache: true
+      - name: Set up Python
+        run: uv python install ${{ env.PYTHON_VERSION }}
+      - name: Install deps
+        run: uv sync
+      - name: Ruff
+        run: uv run ruff check .
+      - name: Ruff format check
+        run: uv run ruff format --check .
+      - name: Mypy
+        run: uv run mypy app
+      - name: Alembic upgrade (empty baseline)
+        env:
+          POSTGRES_SERVER: localhost
+          POSTGRES_PORT: "5432"
+          POSTGRES_USER: alloy
+          POSTGRES_PASSWORD: alloy
+          POSTGRES_DB: alloy
+        run: uv run alembic upgrade head || echo "no migrations yet — OK for Phase 0"
+      - name: Pytest
+        env:
+          ENVIRONMENT: local
+          POSTGRES_SERVER: localhost
+          POSTGRES_PORT: "5432"
+          POSTGRES_USER: alloy
+          POSTGRES_PASSWORD: alloy
+          POSTGRES_DB: alloy
+          REDIS_URL: redis://localhost:6379/0
+        run: uv run pytest -xvs
+
+  # ─── Frontend: typecheck + lint + vitest ───────────────────────────
+  web:
+    name: web · tsc + eslint + vitest
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.12.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "pnpm"
+          cache-dependency-path: apps/web/pnpm-lock.yaml
+      - name: Install deps
+        run: pnpm install --frozen-lockfile=false
+      - name: Typecheck
+        run: pnpm typecheck
+      - name: Lint
+        run: pnpm lint
+      - name: Test
+        run: pnpm test -- --reporter=default
+
+  # ─── End-to-end smoke: compose up + curl /health + /ping ───────────
+  smoke:
+    name: smoke · docker compose
+    runs-on: ubuntu-latest
+    needs: [api, web]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Seed .env for compose
+        run: |
+          cat > .env <<'EOF'
+          ENVIRONMENT=local
+          POSTGRES_USER=alloy
+          POSTGRES_PASSWORD=alloy
+          POSTGRES_DB=alloy
+          POSTGRES_PORT=5432
+          REDIS_URL=redis://redis:6379/0
+          FRONTEND_HOST=http://localhost:5173
+          AZURE_OPENAI_ENDPOINT=
+          AZURE_OPENAI_API_KEY=
+          AZURE_OPENAI_DEPLOYMENT=gpt-5-mini
+          CLERK_ISSUER=
+          EOF
+      - name: Build + boot stack
+        run: |
+          docker compose up -d db redis
+          docker compose up -d --build api
+          # Wait up to 90s for api health.
+          for i in {1..30}; do
+            if curl -fsS http://localhost:8000/api/v1/health > /dev/null; then
+              echo "api healthy"
+              break
+            fi
+            echo "waiting for api ($i)…"
+            sleep 3
+          done
+      - name: Hit /health
+        run: curl -fsS http://localhost:8000/api/v1/health | tee /dev/stderr | grep -q '"status":"ok"'
+      - name: Hit /ping (local bootstrap — unauthenticated allowed)
+        run: |
+          body=$(curl -fsS http://localhost:8000/api/v1/ping)
+          echo "$body"
+          echo "$body" | grep -q '"ok":true'
+          echo "$body" | grep -q 'dev_user'
+      - name: Dump compose logs on failure
+        if: failure()
+        run: docker compose logs --tail=200
+      - name: Tear down
+        if: always()
+        run: docker compose down -v

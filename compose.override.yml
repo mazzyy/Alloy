@@ -1,0 +1,14 @@
+# Dev-only override: target the builder stage for `web` so Vite can run
+# in-container with hot reload. Compose auto-merges this on `docker compose up`.
+
+services:
+  web:
+    build:
+      target: builder
+  api:
+    # Dev: mount source read-write so structlog colors work and the pytest
+    # cache doesn't get wedged read-only.
+    volumes:
+      - ./apps/api/app:/app/app
+      - ./apps/api/alembic:/app/alembic
+      - ./apps/api/tests:/app/tests

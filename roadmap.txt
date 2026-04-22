@@ -1,0 +1,258 @@
+# Building a production-grade AI full-stack generator: architecture and roadmap
+
+**The wedge is Python.** Every dominant AI code-generator today — Bolt.new, v0, Lovable, Cursor, Replit Agent — is Node/Next.js/Supabase-centric because StackBlitz WebContainers (the in-browser WASM runtime powering Bolt) cannot run FastAPI. WebContainers has no `pip`, Pyodide can't bind a real HTTP socket, and pydantic-core + asyncpg need native wheels. A React + FastAPI + Postgres generator with Cursor-grade edit speed is a genuine market gap, not a "me-too." This document is a concrete build plan for that opportunity: an 18-week roadmap, an end-to-end architecture, and named library picks with pricing. The recommended stack is **Azure OpenAI gpt-5-mini as the planner, Morph Fast-Apply for edits, Daytona Cloud sandboxes for live preview, Neon Postgres branching per project, Clerk + Stripe for the SaaS layer, Langfuse for observability, and tiangolo's full-stack-fastapi-template as the canonical base** — each choice is defended below. You will also need to train (or fine-tune) a Python-idiomatic apply model eventually; Cursor's Fast Apply is trained on JS/TS and no competitor has filled the Python-patch niche.
+
+---
+
+## 1. What the competition actually does (and where it leaves gaps)
+
+The industry has quietly converged on a **two-model architecture**: a frontier "planner" model (Claude Sonnet 4.5 or GPT-5) emits a *lazy* edit sketch with `// ... existing code ...` markers, and a small, specialized "apply" model merges that sketch into the full file at 500–10,000 tokens/sec. Cursor's `Fast Apply` (a fine-tuned Llama-3-70B served on Fireworks with **speculative edits** — a deterministic token-speculation variant that exploits the fact that most output equals input) hits ~1,000 tok/s and set the pattern. Morph (v3-fast, ~10,500 tok/s, ~98% accuracy with Claude Sonnet) and Relace (Apply 3, parity pricing) are the commercially available equivalents, each with OpenAI-compatible APIs using an identical `<instruction><code><update>` schema. GitHub Copilot Edits confirmed in their engineering blog they run the same dual-model pattern with a proprietary "apply changes speculative-decoding endpoint."
+
+Every major tool has also converged on essentially the **Claude Code tool schema**: `Read / Write / Edit / Bash / Glob / Grep / WebFetch / TodoWrite / Task (subagent)`. Windsurf's Cascade, Cursor's Agent, Lovable's Agent Mode, and Cline/Roo/Kilo all mirror this set. **MCP (Model Context Protocol) is now the de facto integration ABI** — a new entrant must support it from day one. Checkpoints via a *shadow git repo* (Roo Code's pattern) have become the production-standard rollback UX.
+
+The sandbox layer splits into three tiers: **in-browser WASM** (Bolt/WebContainers, Claude Artifacts iframe) is JS-only and free; **per-user Firecracker/Docker VMs** (Replit, Vercel Sandbox, Cursor Background Agents) are expensive but full-stack; **local shell** (Cursor, Claude Code, Windsurf) is cheapest but developer-only. **There is no middle ground today that delivers zero-install Python FastAPI previews at Bolt-class UX** — that is precisely the gap this product fills.
+
+Pricing has converged on **~$20–25/mo Pro tiers denominated in dollar-credits**, not tokens. Bolt's token-based pricing got panned in 2025; Cursor's June 2025 credit rework caused such a backlash they publicly apologized and issued refunds; Lovable locked in at $25/mo for 100+5/day credits and it stuck. Any new entrant that deviates from credits + $25 Pro introduces friction for no strategic gain.
+
+**Specific Python/FastAPI gotchas most competitors handle poorly** and that the product should treat as first-class: Pydantic v1 vs v2 confusion in LLM output, async `asyncpg` vs sync `psycopg2` URL mismatches, indentation-sensitive diffs that break exact-string replace after Black formatting, Alembic auto-migrations needing a live Postgres, CORS `allow_credentials=True` with explicit origin lists, and the `pip install` latency tax (mitigated with `uv` and pre-baked base images).
+
+---
+
+## 2. Reference system architecture
+
+```
+                                   ┌────────────────────────────────────────┐
+                                   │            React frontend              │
+                                   │  Monaco editor + diff view + chat +    │
+                                   │  file tree + live preview iframe +     │
+                                   │  element inspector overlay             │
+                                   └────────────┬───────────────────────────┘
+                                                │ WSS (streaming tokens + tool events)
+                                                │ HTTPS (REST + SSE)
+                                   ┌────────────▼───────────────────────────┐
+                                   │   FastAPI gateway (async, uvicorn)     │
+                                   │   Clerk JWT verify + tenant resolve    │
+                                   │   slowapi rate-limit (Redis)           │
+                                   └────────────┬───────────────────────────┘
+                                                │
+          ┌────────────────────┬────────────────┼──────────────────┬────────────────┐
+          ▼                    ▼                ▼                  ▼                ▼
+   ┌────────────┐      ┌─────────────┐   ┌───────────┐      ┌──────────┐   ┌───────────────┐
+   │  Arq queue │      │ LiteLLM     │   │  Postgres │      │  Redis   │   │  Object store │
+   │  (Redis)   │      │ router      │   │  (Neon)   │      │ Upstash  │   │  Cloudflare R2│
+   │ generation │      │             │   │  metadata │      │  cache   │   │  + project git│
+   │ workers    │      │ Azure OAI   │   │  + RLS    │      │  + queue │   │  bundles      │
+   └─────┬──────┘      │ gpt-5-mini  │   └───────────┘      └──────────┘   └───────────────┘
+         │             │  ↳ region A │
+         │             │  ↳ region B │
+         │             │ OpenAI fb   │
+         │             │ Claude fb   │
+         │             │ Morph Apply │
+         │             │ Relace Apply│
+         │             └─────────────┘
+         │
+         ▼
+   ┌──────────────────────────────────────┐       ┌──────────────────────────────────┐
+   │   Daytona Cloud sandbox (per project)│◀─────▶│  GitHub App (repo create / PR)   │
+   │   Firecracker-lite, docker-compose,  │       │  Vercel API (frontend deploy)    │
+   │   pre-baked Python+Node image,       │       │  Railway / ACA (Phase 2 backend) │
+   │   project git repo inside, Postgres  │       └──────────────────────────────────┘
+   │   (or Neon branch), auto-archive     │
+   └──────────────────────────────────────┘
+         ▲
+         │  Langfuse traces (self-hosted) · Sentry errors · PostHog product analytics · Axiom logs
+```
+
+The **gateway** (FastAPI) is pure I/O — auth, tenant resolve, rate-limit, stream orchestration, and queueing. All generation work runs in **Arq workers** so gateway replicas stay stateless and horizontally scalable. **LiteLLM** is embedded in the worker (or run as a sidecar proxy) to centralize model routing, fallbacks, cost tracking, and cache-key stabilization. **Every project gets an isolated Daytona sandbox** containing its own git repo, docker-compose stack, and preview URL; sandboxes auto-archive on idle and resume in ~90ms, so COGS track active usage rather than projects created.
+
+---
+
+## 3. The code-generation pipeline
+
+The pipeline is six phases with explicit hand-offs. Every phase commits to the project's git repo so rollback is always `git reset --hard <sha>`.
+
+**Phase 1 — Intake & spec extraction.** The user's prompt enters an *Intake Agent* that asks clarifying questions via structured JSON, then a *Spec Agent* using **Pydantic AI** emits a validated `AppSpec` object (entities, routes, pages, auth, integrations). The spec is **editable in the UI before any code is written** — this is the Copilot Workspace pattern and it is the single biggest trust-builder for non-technical users. The schema covers entities with field types and relations, routes with `RoutePermission`, pages with `data_deps` pointing to route handlers, and an `AuthConfig` picking among `fastapi_users_jwt`, `custom_jwt`, or `clerk`.
+
+**Phase 2 — Planning.** The *Planner Agent* turns AppSpec into an ordered `BuildPlan`: a DAG of file operations with explicit dependencies (models → migrations → schemas → CRUD helpers → routers → tests → OpenAPI export → TS client → hooks → pages). It also selects the base template (`fastapi-fullstack` default) and the list of blocks to merge (`auth/clerk`, `billing/stripe`, `storage/r2`, etc.).
+
+**Phase 3 — Scaffold.** This phase is **purely deterministic — no LLM calls**. A Copier-based scaffolder forks your customized `full-stack-fastapi-template` and merges the selected feature blocks at declared AST patch points. This cuts generation cost by ~60–70% versus cold-generating boilerplate and eliminates the hallucinated-dependency-version class of bugs. Commit baseline as `feat: scaffold`.
+
+**Phase 4 — Iterative generation.** A **LangGraph** outer loop runs one node per BuildPlan task, each invoking a **Pydantic AI Coder Agent** with the tool schema below. Context management is tiered: file tree always in system prompt (~2k tokens); AST summaries of non-target files (classes, function signatures, Pydantic models) cached in a `module_symbols.json` regenerated on commit; full contents only for the target file + direct imports; RAG (tree-sitter chunks + `text-embedding-3-small`) exposed as a `search_code` tool rather than stuffed in context. After each write the validator runs `ruff check --fix`, `mypy`, and `pytest -x` (Python) plus `tsc --noEmit`, `eslint`, `vitest run` (frontend), with the top-N diagnostics fed back in as "fix these specific errors; do not refactor unrelated code." Retries cap at 3; beyond that the task surfaces for human review.
+
+**Phase 5 — Integration.** Alembic autogenerates a migration inside the sandbox and runs `alembic upgrade head` against a live Postgres. FastAPI's `openapi.json` is exported and fed to **@hey-api/openapi-ts** (the new de facto standard, used by Vercel and FastAPI's own docs) to emit a typed TS client with TanStack Query hooks. A Playwright smoke test boots the app and asserts the critical paths (Replit Agent 3's "Potemkin interface" defense).
+
+**Phase 6 — Preview & deploy.** Daytona serves the live preview URL on a per-project subdomain. The Deploy button triggers GitHub App commit → Vercel frontend deploy → Railway/ACA backend deploy (Phase 2).
+
+**The Coder Agent tool schema** borrows Claude Code's design and adds Python-native tools: `list_files`, `read_file(path, start_line, end_line)`, `write_file`, **`apply_patch(path, unified_diff)` (preferred over write_file for edits)**, `search_code(query, k)`, `ast_summary(path)`, `run_command(cmd)` with an allow-list (`alembic`, `pytest`, `ruff`, `mypy`, `npm`, `tsc`, `eslint`, `vitest`, `uv`), `run_validators(targets)`, `openapi_export`, `regenerate_client`, `alembic_autogenerate(message)`, `git_commit(message)`, and `request_human_review(question, options)` for ambiguous specs or destructive migrations (`op.drop_table` triggers this automatically).
+
+---
+
+## 4. The surgical edit mechanism — the hardest problem, solved with layers
+
+No single edit format serves both a non-coder clicking a button and an expert typing into Monaco. The answer is a **five-layer edit architecture** routed by user intent, not user tier:
+
+| Layer | Trigger | Edit format | Apply mechanism | Latency target |
+|---|---|---|---|---|
+| **L0 — Visual controls** | Click element → property panel (color, padding, text) | Direct AST patch via **ts-morph** | No LLM; deterministic | <100 ms |
+| **L1 — Natural language on selected element** | "Make this a pricing card" | Claude Sonnet 4.5 emits lazy snippet (single file) | **Morph v3 Fast Apply** → HMR | <3 s |
+| **L2 — Chat edit on a feature** | "Add a settings page" | Sonnet emits multi-file lazy edits; planner sequences DAG | Morph per-file, parallel | 5–15 s |
+| **L3 — Agentic multi-file backend+frontend** | "Add OAuth login" | Sonnet in agent loop with full tool schema | MultiEdit for small in-file ops; lazy-snippet + Morph for large files | 30–120 s |
+| **L4 — Raw editing** | Expert types in Monaco | Filesystem write | HMR | instant |
+
+**Edit-format research verdict:** search/replace blocks (Aider's `<<<<<<< SEARCH` pattern) beat unified diffs slightly on strong models per the Diff-XYZ benchmark (arXiv 2510.12487), but **full-file rewrite loses to lazy-snippet + fast-apply on both cost and speed** once files exceed ~50 LOC. Morph's published numbers with Claude Sonnet are 98% accuracy at ~6 seconds per file, versus 86% accuracy at ~35 seconds for raw search/replace and ~100s for Claude full-file rewrites. Use full-file only for new files. Use deterministic ts-morph/libcst for well-specified operations (renames, add-field-to-model, add-route) — 10× more reliable than trusting an LLM for boilerplate and costs zero tokens.
+
+**Visual element picker — build this with a custom Babel/SWC plugin, not React DevTools.** Inject `data-oid="<stable-uuid>"` and `data-loc="src/Hero.tsx:14:6"` on every JSX opening element at build time (Onlook uses exactly this pattern). Maintain a server-side **oid manifest** (`oid → {file, byteStart, byteEnd, tag, componentName}`) generated during each build for O(1) reverse lookup. The preview iframe runs a content script that intercepts clicks in "select mode," reads `data-oid`, and `postMessage`s `{oid, boundingBox, computedStyle, textContent}` to the parent React app. The parent shows a properties panel for deterministic edits (AST-patched live) and a natural-language input that scopes the LLM prompt to just that file with ±20 lines of surrounding context.
+
+**Fast-apply provider: Morph primary, Relace fallback.** Morph's `auto` routing switches between v3-fast (single-scope edits, 10K+ tok/s) and v3-large (complex multi-scope) transparently. Relace Apply 3 is at parity on price ($0.85/$1.25 vs $0.80/$1.20) and uses identical API shape, so build a thin adapter and failover on outage. Both are OpenAI-compatible — one extra base_url. **Do not self-host until spend exceeds ~$5K/mo**: Morph's custom CUDA kernels + speculative decoding are hard to beat below that. At scale, fine-tune Qwen2.5-Coder-7B on the Kortix/FastApply dataset and serve on vLLM with speculative decoding (expect 1,500–3,000 tok/s on an H100).
+
+**Checkpointing: real git repo per project, shadow commits per turn, worktrees for agent edits.** Roo Code's pattern is production-proven. Every project's storage *is* a git repo in the Daytona sandbox. Before any edit, `git commit -m "checkpoint: before <turn-id>"` on an internal `agent/main` branch. For multi-file agent edits, `git worktree add /tmp/<turn-id> HEAD`; edits happen in the worktree; validators run; on green, fast-forward merge; on red after N retries, abandon the worktree and show the user a diff + error. User-visible checkpoints appear in the chat sidebar ("restore to here") and map to commits — restoring also rewinds conversation turns so the model's context stays coherent (Hermes pattern).
+
+**Model routing** for edits: Claude Sonnet 4.5 as primary planner (top SWE-bench scores, excellent at lazy-snippet format), **Azure OpenAI gpt-5-mini as the cost-optimized default and the primary for spec extraction / simpler tasks**, and GPT-5 full for hard reasoning. For expert-tier next-edit autocomplete, Continue's self-hosted Instinct or Mercury Coder API gives the Cursor Tab experience.
+
+---
+
+## 5. Azure OpenAI gpt-5-mini — what actually matters
+
+gpt-5-mini offers a **400K token context (272K input / 128K output including reasoning tokens) at $0.25/$2.00 per 1M tokens**, with cached input at ~10% of that — an order of magnitude cheaper than Claude Sonnet. It supports function calling, structured outputs via JSON schema, streaming via SSE, `reasoning_effort` (`minimal`/`low`/`medium`/`high`), `verbosity` (`low`/`medium`/`high` — via Responses API; Chat Completions silently ignores), and automatic prompt caching on prefixes ≥1024 tokens. **Use the Responses API path** (`api_version="2025-04-01-preview"` or later, or omit and call `openai/v1/responses`) — it persists chain-of-thought across turns, improves cache hit rates, and lowers latency, which matters for multi-turn agents.
+
+**Rate limits are the single biggest operational risk.** Azure's documented ceilings are 2M TPM / 20K RPM on Global Standard, but actual assigned defaults are often 200K–500K TPM pending quota-increase tickets. **Deploy in two regions from day one** (East US 2 + Sweden Central are both GA for gpt-5 family) and weighted-load-balance via LiteLLM. Buy PTUs only when you have predictable baseline load.
+
+**Prompting discipline for GPT-5 family:** start with `reasoning_effort="low"` (or `minimal`), bump only on quality regressions; `verbosity="low"` for code-gen output; minimal preamble ("think step by step" wastes reasoning tokens — the model already does); place static context (system prompt, style guide, boilerplate) first and variable user inputs last to maximize cache hits. A canonical streaming call looks like:
+
+```python
+from openai import AzureOpenAI
+from azure.identity import DefaultAzureCredential, get_bearer_token_provider
+
+client = AzureOpenAI(
+    azure_endpoint=os.environ["AZURE_OPENAI_ENDPOINT"],
+    api_version="2025-04-01-preview",
+    azure_ad_token_provider=get_bearer_token_provider(
+        DefaultAzureCredential(),
+        "https://cognitiveservices.azure.com/.default",
+    ),
+)
+
+stream = client.chat.completions.create(
+    model=os.environ["AZURE_OPENAI_DEPLOYMENT"],  # gpt-5-mini deployment name
+    messages=[
+        {"role": "system", "content": SYSTEM_PROMPT_STATIC},
+        {"role": "user",   "content": user_request},
+    ],
+    reasoning_effort="low",
+    max_completion_tokens=4000,
+    stream=True,
+    stream_options={"include_usage": True},
+    extra_body={"prompt_cache_key": f"user:{user_id}:codegen:v1"},
+)
+for chunk in stream:
+    if chunk.choices and chunk.choices[0].delta.content:
+        yield chunk.choices[0].delta.content
+```
+
+**Fallback cascade via LiteLLM:** Azure gpt-5-mini (region A) → Azure gpt-5-mini (region B) → OpenAI direct gpt-5-mini → Anthropic Claude Sonnet. Route on 429/5xx/timeout; track per-provider success rate in Langfuse. **Azure-specific quirks worth pre-solving:** content filters default to "medium" across Jailbreak/Hate/Sexual/Violence/Self-harm — for a code-gen SaaS, code containing strings like credentials or shell commands can trip the filter, so submit a Limited Access exemption form early; Assistants API is deprecated on Azure in favor of the Responses API; `prompt_cache_retention=24h` is OpenAI-direct only and returns 400 on Azure.
+
+---
+
+## 6. Sandbox and preview infrastructure
+
+The preview requirement is brutal: **run a real FastAPI + Postgres + React stack per user, boot fast, scale to thousands, cost pennies per hour**. WebContainers is disqualified (no pip, no native wheels). Sandpack/Nodebox can't run Python at all. That forces cloud VMs.
+
+| Service | Cold start | $ per hour (small) | Verdict |
+|---|---|---|---|
+| **Daytona Cloud** | 27–90 ms | ~$0.067 (1 vCPU / 1 GiB) | **Primary pick** — persistent, auto-archive, any OCI image, per-second billing |
+| **Fly Machines + Sprites** | <1–2 s | ~$0.07/CPU-hr (Sprites) | **Secondary / scale-out** — explicitly positioned for agent sandboxes, 100 GB NVMe per sprite |
+| **E2B** | ~150 ms | $0.0504/vCPU-hr + $150/mo base | Worse unit economics at scale; Firecracker isolation overkill for code you're about to deploy |
+| **Modal Sandboxes** | 2–5 s cold | gVisor, Python-SDK-defined images | Keep for GPU batch (embeddings), not preview |
+| **Vercel Sandbox** | ~1 s | $0.128/vCPU-hr | Only if fully Vercel-native; single region |
+| **Cloudflare Containers** | ms (hot) | ~$0.072/vCPU-hr | Pricey for always-on preview; great for bursty edge agent calls |
+| **WebContainers/Sandpack** | instant | free (client CPU) | **Lite preview for React only** while backend boots |
+
+**The recommended hybrid is two-tier.** Tier 1 is **instant lite preview via Sandpack with a Vite template in the dashboard** — the user sees UI changes in <1 second as tokens stream, with a **Mock Service Worker layer auto-generated from the OpenAPI schema** serving fake fixtures so no backend boot is needed. Tier 2 is **full live preview in a Daytona Cloud sandbox** running the real `docker-compose` stack on demand (clicking "Run backend" or after backend edits), with per-project Postgres (either in-sandbox or via Neon branching — Neon's 500 ms branch creation and scale-to-zero compute is the right answer for paid tiers).
+
+**Economic model:** 2h/day × 30 days × $0.067/hr ≈ **$4/project/month of active preview**, idle near-zero. At 1,000 paying users × 5 projects each averaging light usage, infra COGS ≈ $20–40K/mo; at $25/user/mo that's workable. E2B Pro would be ~$8 + $150 base — worse. Aggressive auto-archive (5 min idle) is essential for free-tier economics.
+
+---
+
+## 7. Phase 1 deployment targets: Docker, Vercel, GitHub
+
+**Docker generation** produces a multi-stage Dockerfile for each service. The React frontend builds with Node 22-alpine, serves via `nginxinc/nginx-unprivileged` (non-root, port 8080), configures SPA fallback + long-cache immutable assets + `no-cache` on index.html + a `/healthz` endpoint, and lands at ~30 MB. The FastAPI backend uses the `ghcr.io/astral-sh/uv:python3.12-bookworm-slim` builder image with `uv sync --frozen --no-dev` and `--mount=type=cache` for layer caching, then runs as a non-root user (uid 10001) on `python:3.12-slim-bookworm` with Gunicorn + `uvicorn.workers.UvicornWorker` × 4, lands at ~150 MB. **Never alpine for Python** — musl libc breaks pandas, numpy, asyncpg, and pydantic-core wheels. **Never `COPY .env` into the image**; only `.env.example` is committed, with secrets injected at runtime via Docker secrets, Azure Key Vault, or platform env. `docker-compose.yml` wires frontend + backend + Postgres 16-alpine + Redis 7-alpine with healthchecks and depends_on conditions.
+
+**GitHub integration — use a GitHub App, not an OAuth App.** GitHub Apps get **5,000/hr user tokens + 5,000/hr installation tokens scaling to 12,500–15,000/hr with org size**, versus a shared-per-user 5,000/hr for OAuth Apps. Installations survive user offboarding, fine-grained permissions (`contents:write`, `pull_requests:write`, `metadata:read`, optionally `administration:write` for org repos and `workflows:write` for CI) replace all-or-nothing OAuth scopes, and installation tokens are short-lived (1 hour, auto-refresh from a JWT signed by the App's private key). Flow: user clicks Connect GitHub → redirect to `/apps/YOUR_APP/installations/new` → user picks account + repos → you store `installation_id`. For each API call mint a 9-minute JWT (`iss=app_id`, RS256), exchange at `/app/installations/{id}/access_tokens`, cache for 55 minutes. For PR-based editing, use the Git Data API directly (create blobs → create tree → create commit → update ref → open PR) — no local clone needed for small edits; for larger work use `pygit2` to `git clone --depth 1 --filter=blob:none` into an ephemeral per-job workspace. **Library stack: PyGithub (REST object model) + pygit2 (clone/push without subprocess) + httpx (webhooks).** Verify every webhook with `X-Hub-Signature-256` HMAC; process asynchronously to avoid the 10-second timeout. Run **Gitleaks** on every generation output pre-commit, never inline secrets (emit `process.env.X` references + `.env.example`), and never log the installation token (redact `Authorization:` in Langfuse traces).
+
+**Vercel deployment** uses the `api.vercel.com` REST API with Bearer auth (team scope via `?teamId=...`). Four endpoints do everything: `POST /v10/projects` (create project, link GitHub repo, framework=vite), `POST /v10/projects/{id}/env?upsert=true` (set `VITE_API_URL` etc., type `sensitive` for secrets), `POST /v13/deployments` (trigger from a commit SHA or file payload), `GET /v3/deployments/{id}/events?follow=1` (SSE stream of build logs to pipe into the user's UI). Preview deployments are automatic on every non-prod branch, giving a unique URL per LLM edit — this becomes the "share this version" UX. Custom domain assignment is `POST /v10/projects/{id}/domains` then `POST /v2/deployments/{id}/aliases` after DNS CNAME verification. Use `@vercel/sdk` if the orchestrator is Node, otherwise wrap the REST endpoints. **For Phase 2 full-stack deployment, Railway is the easiest programmatic target** (GraphQL `projectCreate` + `serviceCreate` + managed Postgres with auto-wired `DATABASE_URL` reference variables); **Azure Container Apps is the enterprise answer** (keeps data in Azure alongside the OpenAI deployment, VNet integration, consistent billing) and **Fly.io Machines is the regional-latency answer**.
+
+---
+
+## 8. Observability, orchestration, and the SaaS layer
+
+**Langfuse (self-hosted, MIT-licensed) is the correct LLM observability pick** for a code-gen SaaS. Data sovereignty matters — user prompts contain proprietary source — and Langfuse runs on a Postgres + ClickHouse + web + worker Docker Compose. It gives framework-agnostic tracing (OpenAI SDK, LangGraph, Pydantic AI, LiteLLM callbacks), built-in prompt management with semver labels for A/B and rollback, automatic cost aggregation per user/project/session, and LLM-as-judge evals. LangSmith is a viable alternative only if fully committed to LangChain; Helicone is best as a complementary AI gateway (zero-code proxy observability + caching) in front of Azure.
+
+**LLM orchestration: Pydantic AI + LangGraph, in that order.** Pydantic AI handles agent definition with type-safe tools, Pydantic-native structured output (perfect for the AppSpec schema), model-agnostic routing, and streaming. LangGraph wraps the outer build loop where you need conditional edges, checkpointing for resumability, and time-travel debugging. Avoid CrewAI (role-based abstraction is noise for code gen), OpenAI Agents SDK (locks to OpenAI), and AutoGen (expensive chattering). Raw SDK is viable but costs 3–4 eng-weeks reimplementing retries/tool dispatch/streaming.
+
+**SaaS-layer picks with reasoning:**
+
+| Category | Pick | Why |
+|---|---|---|
+| **Auth** | **Clerk** (Free 50K MAU, Pro $25 + $0.02/MAU) | Pre-built React components, organizations, passkeys, fastest path to polished UX |
+| **Enterprise SSO** | **WorkOS** (AuthKit free to 1M MAU) | SAML/SCIM without the Auth0 tax; pair with Clerk for B2B tier |
+| **Billing** | **Stripe Billing + in-app credit ledger** | Roll your own ledger (`credit_wallets`, `credit_grants`, `credit_ledger`) on Postgres + Redis; graduate to Orb above $1M ARR |
+| **DB** | **Neon** | Postgres + branching + scale-to-zero matches per-project sandbox model |
+| **Queue** | **Arq** | Async-first, Redis-backed, FastAPI-idiomatic; LLM calls are I/O-bound |
+| **Cache / rate-limit** | **Upstash Redis** + slowapi | Per-command pricing, HTTP API, works from edge |
+| **Object storage** | **Cloudflare R2** | Zero egress for preview/bundle downloads |
+| **Errors** | Sentry | Default; first-class FastAPI + React SDKs |
+| **Product analytics** | PostHog (self-host) | Events + session replay + flags, PII in your VPC |
+| **LLM traces** | **Langfuse (self-host)** | See above |
+| **Logs** | Axiom | Cheap APL query, ~10× cheaper than Datadog at this stage |
+| **Secret vault** | Infisical + AWS KMS | OSS for dev secrets; user-provided API keys AES-256-GCM per-tenant, KMS-wrapped |
+| **CDN/WAF** | Cloudflare Pro | DDoS + WAF + Turnstile + Workers for preview subdomain |
+
+**Pricing model:** dollar-denominated credits, mirroring the Lovable/Cursor $25 convergence. Internally track both tokens and credits; externally show credits only. Simple edit = 1 credit; multi-file edit = 3; cold full-app generation = 10; template-based scaffold = 4; deploy = 1; integration install = 2. Budget ~$0.015 COGS per credit, mark up ~4×. Tiers: Free ($0, 30 credits/mo with 5/day cap, 1 project, no custom domain, Turnstile + phone verification triggers after suspicious signals), **Pro ($25/mo, 250 credits + 5/day bonus, unused roll one month, 10 private projects, top-ups $10/100 credits)**, Pro+ ($60/mo, 750 credits, priority queue, whole-repo context), Team ($50/user/mo, pooled credits, SSO, audit logs), Enterprise (from $2K/mo, dedicated sandboxes, SOC2, SLA).
+
+**Multi-tenancy:** single Postgres cluster, shared schema, every tenant table gets `tenant_id uuid NOT NULL` + index, enforced via Postgres **Row-Level Security with `FORCE ROW LEVEL SECURITY`** (owner otherwise bypasses). Clerk JWT carries `org_id` as custom claim; FastAPI dependency extracts it and calls `SET LOCAL app.current_tenant` inside each request's transaction (critical with PgBouncer transaction-mode pooling). App connects as a non-owner role without `BYPASSRLS`. Integration-test isolation: for every endpoint, a test case runs as tenant A and asserts 404 on tenant B's resources.
+
+**Security / prompt injection defense (the hardest problem in an agentic code tool reading user repos):** layer defenses because none is sufficient alone. The October 2025 "Attacker Moves Second" paper (Nasr/Carlini et al., 14 authors) and December 2025 MCP Git server CVEs both show frontier models remain vulnerable to adaptive attacks. Stack: (1) **spotlighting** — wrap all untrusted content in `<<UNTRUSTED_{nonce}>>...<</UNTRUSTED_{nonce}>>` with per-request nonces and a system prompt declaring the boundary; (2) **structured queries** separating instruction and data channels; (3) **tool-call allowlist** with strict JSON-schema arguments, `shell`/`fetch`/`env_get` disabled by default; (4) **Rule of Two** — any agent invocation gets at most two of {untrusted input, privileged tool, external egress}; (5) **PromptArmor/PromptShield classifier** on inbound context (catches low-effort attacks, bypassable at >90% by adaptive attackers so treat as layer not gate); (6) **output firewall** — no raw model URLs/images surfaced without server-side rewrite, block data-URL exfiltration; (7) **sandboxed execution** — generated code never has your cloud credentials, runs in the per-project Daytona sandbox with egress allowlist; (8) **secret scanning with gitleaks + TruffleHog** on every generation output; (9) **observability alerts** on unusual tool-call sequences (read_file → fetch → write_file within one turn); (10) **AgentDojo-based red-team regression suite in CI**.
+
+---
+
+## 9. Template library — the real differentiator
+
+**Philosophy: one canonical base + composable typed blocks, LLM as customizer not boilerplate author.** v0 generates from scratch (great for components, weak for apps); Bolt uses an implicit system-prompt template (hence token burn); Lovable bakes in Supabase. The winning architecture for a stack-opinionated React+FastAPI generator is a **single canonical base template + versioned feature blocks + deterministic scaffolder + LLM on top for domain code only**.
+
+**Base template:** fork `fastapi/full-stack-fastapi-template` (MIT, ~30K stars) once into your org. Keep its FastAPI + SQLModel + Alembic + Postgres + Vite+React+TS + Docker + GitHub Actions; swap the UI layer to shadcn + Tailwind; add `@hey-api/openapi-ts` codegen as a Vite plugin; add Daytona devcontainer config. Use Copier as the template engine (the original template already uses it, so `copier update` gives you template-upgrade PRs for free).
+
+**Feature blocks** declare schema fragments, route registrations, UI route entries, env vars, dependencies, and named AST patch points in the base. Ship with a `block.yaml` manifest. First set: `auth/clerk`, `auth/jwt`, `billing/stripe-subscriptions`, `billing/stripe-credits`, `billing/stripe-connect`, `storage/r2`, `queue/arq`, `realtime/ws`, `search/meilisearch`, `cms/tiptap`, `email/resend`, `notifications/pusher-beams`. The planner agent emits a recipe (`base=react-fastapi, blocks=[...], entities=[...]`) and the deterministic scaffolder applies it — no LLM calls in scaffold phase, ~60–70% cost reduction vs cold-gen, reproducible, no hallucinated dependency versions.
+
+**Ship these seven templates, in this order** (build dates from a 2-eng team):
+
+1. **SaaS starter** (week 1–2, 5–7 eng-days) — `user`/`org`/`membership`/`subscription`/`invoice`/`api_key`; Clerk with Organizations; Stripe Checkout + Portal + webhooks; Resend email; dashboard with KPIs, Settings (Profile/Org/Members/Billing/API Keys), onboarding wizard. **Highest-hit template.**
+2. **CRUD admin panel** (week 2, 4–5 eng-days) — configurable resources with filter/sort/pagination/bulk/export, role-gated, TanStack Table, form-from-schema, audit log, impersonation. Based on Refine.dev patterns + fastapi-crudrouter.
+3. **File-processing / background jobs** (week 3, 4 eng-days) — uploads (presigned R2), Arq job queue, SSE progress stream, webhook notifications, optional AI processing step.
+4. **Blog / CMS** (week 5, 5 eng-days) — posts/authors/tags/media/comments/subscribers; Cloudflare cached public reads; TipTap rich-text admin; R2 image pipeline; RSS + sitemap; Resend newsletter.
+5. **Real-time chat** (week 4, 7 eng-days) — channels/messages/reactions/presence; FastAPI WebSockets with signed-token auth; Redis Pub/Sub fanout; typing indicators; threads; Pusher Beams pushes.
+6. **Social feed** (week 6, 6 eng-days) — profiles/follows/posts/likes/notifications; Redis sorted-sets for feeds; infinite scroll; Meilisearch.
+7. **Two-sided marketplace** (weeks 7–8, 10–12 eng-days) — buyers/sellers/listings/orders/payouts/reviews/disputes; Stripe Connect Express onboarding; Checkout with `application_fee_amount`; search; reviews; dispute center. Most complex due to Connect + KYC compliance.
+
+Template versioning uses semver; every generated project records its manifest (`base@1.4.2 + block versions`); security CVEs trigger an agent-generated "template update available" PR against the user's repo. File-level policy in the sandbox blocks writes to `blocks/*` and `base/*` — those are upgradeable surfaces. LLM only modifies user-domain code.
+
+---
+
+## 10. The 18-week roadmap
+
+**Phase 0 — Foundation (weeks 1–2).** Azure subscription with gpt-5-mini deployments in two regions (East US 2 + Sweden Central); content-filter exemption request submitted. GitHub App registered, private key in Azure Key Vault. Monorepo skeleton: `/apps/web` (Vite+React+TS+Tailwind+shadcn+TanStack Query), `/apps/api` (FastAPI+SQLModel+Alembic+Clerk JWT verification), `/packages/shared` (typed schemas). Neon project, Upstash Redis, Cloudflare R2 bucket, Langfuse self-hosted on a small VPS. Docker Compose dev environment. CI: GitHub Actions running ruff/mypy/pytest/tsc/eslint/vitest + Playwright smoke. Sentry + PostHog + Axiom wired. **Deliverables:** working end-to-end skeleton where a logged-in user can hit a Clerk-protected `/api/ping`. **Risk:** Azure quota approval is the critical path — file the ticket week 1.
+
+**Phase 1 — Core generation (weeks 3–6).** Pydantic AI Spec Agent + Planner Agent behind a streaming FastAPI endpoint. LangGraph outer build loop. Coder Agent with full tool schema executing inside a Daytona sandbox per project. Base template forked and customized; `auth/clerk` and `storage/r2` blocks done. Deterministic scaffolder (Copier-based). Validator loop (ruff/mypy/pytest + tsc/eslint/vitest) with top-N diagnostics fed back, 3-retry cap. LiteLLM router with Azure-primary + OpenAI-fallback + Claude-last-resort. Frontend: Monaco editor + file tree + chat stream + Sandpack lite preview + Daytona full preview toggle. **Deliverables:** user types "build a task tracker for my team," spec agent proposes AppSpec, user edits in UI, full-stack app generates in 2–3 minutes, preview runs. **Risks:** context management with gpt-5-mini's 272K input cap on large codebases (mitigate with AST summaries + RAG tools); Daytona sandbox boot reliability (have Fly.io Sprites as warm backup).
+
+**Phase 2 — Surgical edits (weeks 7–9).** Morph Fast-Apply integration with Relace fallback adapter. Babel/SWC plugin injecting `data-oid` + `data-loc`; server-side oid manifest generation; preview iframe overlay with postMessage protocol. L0 ts-morph AST-patch handlers for color/padding/text/className. L1 "describe this element" NL→Morph flow. L2 multi-file chat edits. L3 agentic edits with worktree-per-edit. Monaco diff viewer with per-hunk accept/reject. Checkpoint UI in chat sidebar (restore also rewinds conversation turns). Tree-sitter repo map + code-search tool + AST summary tool. **Deliverables:** non-coder can click a button, say "make this a pricing card," and see it rebuilt in 3s; expert can Cmd+K for inline edits. **Risk:** indentation-sensitive Python patches failing — add a post-format re-parse validator and auto-retry.
+
+**Phase 3 — GitHub + Docker + Vercel (weeks 10–12).** GitHub App flow end-to-end (install, JWT exchange, installation token cache, repo create, tree-commit PR, clone for continuation). Dockerfile generation per project (multi-stage React + FastAPI, nginx-unprivileged, uv, slim-bookworm). docker-compose.yml with healthchecks. Vercel API integration (project create, env vars, deploy, SSE log stream, preview-per-edit, custom-domain verify + alias). Second template (CRUD admin) and third (file-processing) shipped. gitleaks pre-commit; secret-scanning webhook subscription. **Deliverables:** one-click "Push to GitHub" + "Deploy frontend to Vercel," with deploy logs streaming in the UI. **Risk:** Vercel build config drift (pin vercel.json in template).
+
+**Phase 4 — Production hardening (weeks 13–16).** Clerk Organizations + WorkOS SSO addon. Stripe Billing + in-app credit ledger (Postgres wallet/grants/ledger + Redis hot-path decrement) + Stripe Customer Portal. slowapi + Upstash rate-limits per tier. Row-Level Security enabled on every tenant table with `FORCE ROW LEVEL SECURITY` + non-owner app role + `SET LOCAL` tenant dependency; isolation test suite in CI. Prompt injection defenses: spotlighting with per-request nonces, Rule of Two enforced in the tool dispatcher, PromptArmor classifier, AgentDojo regression tests in CI. Per-tenant user-secret vault (AES-256-GCM + KMS). Langfuse dashboards for cost per user/project. Sentry alerting. Load test: 100 concurrent generations, measure Azure TPM consumption, tune batch sizes. Templates 4–6 (blog, chat, social feed). **Deliverables:** production-grade SaaS with billing, security, and three more templates. **Risk:** Azure rate limits under load — have PTU quote ready.
+
+**Phase 5 — Launch prep (weeks 17–18).** Marketplace template (Stripe Connect) shipped. Onboarding flow polish; starter examples gallery; docs site; pricing page; demo video. SOC 2 Type I gap assessment started. Public beta with invite codes; feedback loop via PostHog + Intercom. Launch plan: Product Hunt + HN + developer-audience newsletter + 3 launch-partner customers with $2K/mo Enterprise contracts lined up. **Deliverables:** live public product with 7 templates, paid tiers, enterprise SSO, and a measurable retention cohort.
+
+---
+
+## 11. Conclusion — what's novel here
+
+The commodity version of this product (React + Next + Supabase, WebContainers preview, Claude Sonnet full-file rewrites) is saturated and losing to Cursor/Bolt/Lovable. **The defensible version is the Python-first wedge**: FastAPI + SQLAlchemy + Alembic + pytest generation at Cursor-grade edit speed, backed by a fine-tuned Python apply model nobody else has trained, running in cheap per-project Daytona sandboxes rather than browser WASM. The winning UX pattern — editable AppSpec → deterministic scaffold → LLM only for domain code — cuts generation cost 60–70% versus cold-gen competitors while being more reliable, which is the real complaint users have about Bolt and Lovable at scale (token burn, hallucinated deps, blank-screen deploys). The SaaS layer is boring and well-solved (Clerk + Stripe + Postgres RLS + Arq + Langfuse), so engineering velocity can concentrate on the two actual moats: (1) the Python fast-apply fine-tune and (2) the composable block library. Ship the SaaS starter template in week 2 to use internally for dogfooding — the fastest way to find generation bugs is to generate your own billing page. Plan 18 weeks, staff two senior engineers plus one ML engineer owning the apply-model fine-tune from week 8 onward, and budget ~$40K/mo infra at 1,000 paying users with clear path to 70% gross margin. The market gap is real, the stack is buildable, and the competitive playbook is now explicit.

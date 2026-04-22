@@ -1,0 +1,15 @@
+{
+  "name": "@alloy/shared",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "lint": "echo 'lint delegated to consumer package'",
+    "build": "echo 'source-only package'"
+  }
+}
