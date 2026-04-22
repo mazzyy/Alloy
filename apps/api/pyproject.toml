@@ -46,7 +46,13 @@ dependencies = [
     # Observability
     "sentry-sdk[fastapi]>=2.17.0,<3.0.0",
     "langfuse>=2.53.0,<3.0.0",
+
+    # Shared schemas (local path dep)
+    "alloy-shared",
 ]
+
+[tool.uv.sources]
+alloy-shared = { path = "../../packages/shared/python", editable = true }
 
 [dependency-groups]
 dev = [

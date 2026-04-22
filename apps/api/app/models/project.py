@@ -34,7 +34,7 @@ from sqlmodel import Column, Field, SQLModel
 
 
 def _utcnow() -> datetime:
-    return datetime.now(UTC)
+    return datetime.now(UTC).replace(tzinfo=None)
 
 
 class Project(SQLModel, table=True):
