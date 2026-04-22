@@ -1,7 +1,5 @@
 # Alloy
 
-A production-grade AI full-stack generator that ships **React + FastAPI + Postgres** apps at Cursor-grade edit speed.
-
 The wedge: every dominant AI code-generator today (Bolt, v0, Lovable, Cursor Composer, Replit Agent) is Node/Next/Supabase-centric because in-browser WASM runtimes can't run FastAPI. A Python-first generator with per-project cloud sandboxes and a fine-tuned apply model is a genuine market gap.
 
 ## Stack at a glance
