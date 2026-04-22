@@ -5,7 +5,7 @@ import { Sparkles, Activity, LogOut } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { useApi } from "@/lib/api";
-import { useIdentity } from "@/auth/AuthProvider";
+import { useIdentity } from "@/auth/identity";
 
 type PingResponse = {
   ok: boolean;

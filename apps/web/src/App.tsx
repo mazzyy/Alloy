@@ -1,7 +1,7 @@
 import { Route, Routes, Navigate } from "react-router-dom";
 import { Dashboard } from "@/pages/Dashboard";
 import { SignIn } from "@/pages/SignIn";
-import { useIdentity } from "@/auth/AuthProvider";
+import { useIdentity } from "@/auth/identity";
 
 export default function App() {
   const { isLoaded, isSignedIn } = useIdentity();

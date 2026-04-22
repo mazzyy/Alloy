@@ -15,7 +15,7 @@
   },
   "dependencies": {
     "@clerk/clerk-react": "^5.22.0",
-    "@hey-api/client-fetch": "^0.6.1",
+    "@hey-api/client-fetch": "^0.13.0",
     "@radix-ui/react-slot": "^1.1.1",
     "@tanstack/react-query": "^5.62.8",
     "@tanstack/react-query-devtools": "^5.62.8",

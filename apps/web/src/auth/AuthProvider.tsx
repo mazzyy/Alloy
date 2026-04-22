@@ -8,28 +8,16 @@
  * shows as "dev_user" and /api/v1/ping returns dev_user/dev_tenant.
  */
 
-import { createContext, useContext, type PropsWithChildren } from "react";
-import { ClerkProvider, useAuth as useClerkAuth, useUser } from "@clerk/clerk-react";
-
-type AlloyIdentity = {
-  isLoaded: boolean;
-  isSignedIn: boolean;
-  userId: string | null;
-  email: string | null;
-  /** Returns a bearer token for the backend (or null in dev-bootstrap). */
-  getToken: () => Promise<string | null>;
-};
-
-const DevIdentityContext = createContext<AlloyIdentity>({
-  isLoaded: true,
-  isSignedIn: true,
-  userId: "dev_user",
-  email: "dev@alloy.local",
-  getToken: async () => null,
-});
+import { useContext, type PropsWithChildren } from "react";
+import { ClerkProvider } from "@clerk/clerk-react";
+import { DevIdentityContext } from "./identity";
 
 function DevAuthShell({ children }: PropsWithChildren) {
-  return <DevIdentityContext.Provider value={useContext(DevIdentityContext)}>{children}</DevIdentityContext.Provider>;
+  return (
+    <DevIdentityContext.Provider value={useContext(DevIdentityContext)}>
+      {children}
+    </DevIdentityContext.Provider>
+  );
 }
 
 export function AuthProvider({ children }: PropsWithChildren) {
@@ -42,23 +30,4 @@ export function AuthProvider({ children }: PropsWithChildren) {
       {children}
     </ClerkProvider>
   );
-}
-
-export function useIdentity(): AlloyIdentity {
-  const publishableKey = import.meta.env.VITE_CLERK_PUBLISHABLE_KEY;
-  if (!publishableKey) {
-    // eslint-disable-next-line react-hooks/rules-of-hooks
-    return useContext(DevIdentityContext);
-  }
-  // eslint-disable-next-line react-hooks/rules-of-hooks
-  const clerk = useClerkAuth();
-  // eslint-disable-next-line react-hooks/rules-of-hooks
-  const { user } = useUser();
-  return {
-    isLoaded: clerk.isLoaded,
-    isSignedIn: !!clerk.isSignedIn,
-    userId: clerk.userId ?? null,
-    email: user?.primaryEmailAddress?.emailAddress ?? null,
-    getToken: () => clerk.getToken(),
-  };
 }

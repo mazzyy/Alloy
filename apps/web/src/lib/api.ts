@@ -4,7 +4,7 @@
  * plus a custom auth middleware.
  */
 
-import { useIdentity } from "@/auth/AuthProvider";
+import { useIdentity } from "@/auth/identity";
 
 const API_BASE = "/api/v1"; // Vite dev-proxies to the FastAPI gateway
 

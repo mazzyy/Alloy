@@ -53,8 +53,9 @@ def _jwks_client() -> PyJWKClient:
                 "Set CLERK_ISSUER (and optionally CLERK_JWKS_URL) to enable Clerk auth."
             )
         jwks_url = settings.CLERK_ISSUER.rstrip("/") + "/.well-known/jwks.json"
-    # lifespan=3600: JWK rotation is infrequent; 1h cache matches Clerk's recs.
-    return PyJWKClient(jwks_url, cache_keys=True, lifespan=3600)
+    # JWK rotation is infrequent; default 16-key cache is ample. PyJWT handles
+    # its own TTL internally (hourly refresh) and re-fetches on kid miss.
+    return PyJWKClient(jwks_url, cache_keys=True, max_cached_keys=16)
 
 
 def verify_clerk_token(token: str) -> ClerkClaims:
