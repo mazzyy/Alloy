@@ -13,6 +13,10 @@ export default defineConfig(({ mode }) => {
     resolve: {
       alias: {
         "@": path.resolve(__dirname, "./src"),
+        // Shared Pydantic↔TS schemas live in the monorepo, imported by path
+        // alias rather than a separate pnpm workspace member so Phase 0's
+        // single `pnpm install` keeps working.
+        "@alloy/shared": path.resolve(__dirname, "../../packages/shared/ts/src/index.ts"),
       },
     },
     server: {

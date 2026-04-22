@@ -14,8 +14,9 @@ from sqlmodel import SQLModel
 
 from app.core.config import settings
 
-# Noop import so any future model modules are registered with SQLModel.metadata.
-# Phase 1 will add: `from app import models as _models  # noqa: F401`
+# Import every table-model module so SQLModel.metadata is populated before
+# autogenerate walks it. Adding a new model? Add the import in app/models/__init__.py.
+from app import models as _models  # noqa: F401
 
 config = context.config
 if config.config_file_name is not None:

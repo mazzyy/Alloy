@@ -19,9 +19,10 @@
     "noUncheckedSideEffectImports": true,
     "baseUrl": ".",
     "paths": {
-      "@/*": ["./src/*"]
+      "@/*": ["./src/*"],
+      "@alloy/shared": ["../../packages/shared/ts/src/index.ts"]
     },
     "types": ["vite/client"]
   },
-  "include": ["src"]
+  "include": ["src", "../../packages/shared/ts/src"]
 }

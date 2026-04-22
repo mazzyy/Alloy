@@ -73,7 +73,71 @@ export function useApi() {
     }
   }
 
-  return { request, stream };
+  /**
+   * Structured SSE stream — each event carries a JSON payload on the
+   * `data:` line and an `event:` type (status / result / error).
+   * Used by the Spec + Planner endpoints which emit discrete phase
+   * events rather than free-form tokens.
+   */
+  async function streamJson<TStatus, TResult>(
+    path: string,
+    init: RequestInit,
+    handlers: {
+      onStatus?: (s: TStatus) => void;
+      onResult?: (r: TResult) => void;
+      onError?: (err: string) => void;
+    },
+  ): Promise<void> {
+    const token = await getToken();
+    const headers = new Headers(init.headers);
+    headers.set("Accept", "text/event-stream");
+    headers.set("Content-Type", "application/json");
+    if (token) headers.set("Authorization", `Bearer ${token}`);
+    const res = await fetch(`${API_BASE}${path}`, { ...init, headers });
+    if (!res.ok || !res.body) {
+      const text = await res.text();
+      throw new ApiError(res.status, text || res.statusText);
+    }
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      const events = buf.split("\n\n");
+      buf = events.pop() ?? "";
+      for (const evt of events) {
+        let eventType = "message";
+        let data = "";
+        for (const line of evt.split("\n")) {
+          if (line.startsWith("event: ")) eventType = line.slice(7).trim();
+          else if (line.startsWith("data: ")) data += line.slice(6);
+        }
+        if (!data) continue;
+        if (data === "[DONE]") return;
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(data);
+        } catch {
+          handlers.onError?.(`Bad SSE payload: ${data.slice(0, 200)}`);
+          return;
+        }
+        if (eventType === "error") {
+          const msg =
+            typeof parsed === "object" && parsed && "message" in parsed
+              ? String((parsed as { message: unknown }).message)
+              : String(parsed);
+          handlers.onError?.(msg);
+          return;
+        }
+        if (eventType === "status") handlers.onStatus?.(parsed as TStatus);
+        else if (eventType === "result") handlers.onResult?.(parsed as TResult);
+      }
+    }
+  }
+
+  return { request, stream, streamJson };
 }
 
 export class ApiError extends Error {

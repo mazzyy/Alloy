@@ -31,6 +31,11 @@ dependencies = [
     "litellm>=1.51.0,<2.0.0",
     "azure-identity>=1.19.0,<2.0.0",
 
+    # Agent framework + orchestration
+    # Slim variant pulls only what we need (OpenAI provider); keeps image small.
+    "pydantic-ai-slim[openai]>=1.0.0,<2.0.0",
+    "langgraph>=1.0.0,<2.0.0",
+
     # Jobs / queue
     "arq>=0.26.3,<1.0.0",
     "redis>=5.2.0,<6.0.0",
@@ -76,7 +81,7 @@ exclude = ["alembic", "tests"]
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
-module = ["litellm.*", "arq.*", "slowapi.*"]
+module = ["litellm.*", "arq.*", "slowapi.*", "langgraph.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

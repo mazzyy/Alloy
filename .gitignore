@@ -49,3 +49,8 @@ logs/
 
 # Docker
 .docker/
+
+# Dev script pids
+*.pid
+.api.pid
+.web.pid
