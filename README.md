@@ -6,14 +6,14 @@
 
 ## Progress
 
-| Phase | Status | Weeks | Summary |
-|-------|--------|-------|---------|
-| **Phase 0 — Foundation** | ✅ Complete | 1–2 | Monorepo, Docker Compose, FastAPI gateway, Clerk auth, Azure OpenAI wiring, CI |
-| **Phase 1 — Core Generation** | ✅ Complete | 3–6 | Spec Agent, Planner Agent, AppSpec/BuildPlan schemas, project persistence, streaming SSE endpoints, Build page UI, LiteLLM router |
-| Phase 2 — Surgical Edits | 🔲 Next | 7–9 | Morph Fast-Apply, visual element picker, checkpoints |
-| Phase 3 — GitHub + Docker + Vercel | 🔲 | 10–12 | One-click deploy pipeline |
-| Phase 4 — Production Hardening | 🔲 | 13–16 | Billing, RLS, prompt-injection defenses |
-| Phase 5 — Launch Prep | 🔲 | 17–18 | Templates, SOC 2, public beta |
+| Phase | Status | Summary |
+|-------|--------|---------|
+| **Phase 0 — Foundation** | ✅ Complete | Monorepo, Docker Compose, FastAPI gateway, Clerk auth, Azure OpenAI wiring, CI |
+| **Phase 1 — Core Generation** | ✅ Complete | Spec Agent, Planner Agent, AppSpec/BuildPlan schemas, project persistence, streaming SSE endpoints, Build page UI, LiteLLM router |
+| Phase 2 — Surgical Edits | 🔲 Next | Morph Fast-Apply, visual element picker, checkpoints |
+| Phase 3 — GitHub + Docker + Vercel | 🔲 | One-click deploy pipeline |
+| Phase 4 — Production Hardening | 🔲 | Billing, RLS, prompt-injection defenses |
+| Phase 5 — Launch Prep | 🔲 | Templates, SOC 2, public beta |
 
 ---
 
