@@ -1,0 +1,46 @@
+name: auth/clerk
+version: 0.1.0
+description: |
+  Clerk JWT auth. Verifies tokens via JWKS in FastAPI, wraps the React tree in
+  <ClerkProvider>, and exposes a `useIdentity()` hook. Ships with Organizations
+  support enabled (roadmap §8 SaaS-layer default).
+
+# Python dependencies appended to the generated project's pyproject.toml.
+python_dependencies:
+  - "pyjwt[crypto]>=2.9.0,<3.0.0"
+  - "httpx>=0.27.2,<1.0.0"
+
+# JS dependencies appended to the generated project's package.json (frontend/).
+js_dependencies:
+  "@clerk/clerk-react": "^5.13.0"
+
+# Env vars appended to .env.example with placeholder values.
+env_vars:
+  CLERK_JWKS_URL: "https://<your-clerk-instance>.clerk.accounts.dev/.well-known/jwks.json"
+  CLERK_AUDIENCE: ""
+  VITE_CLERK_PUBLISHABLE_KEY: "pk_test_replace_me"
+
+# Files to overlay into the rendered project. Paths are relative to the
+# generated project root. Paths ending in `.jinja` are templated with the
+# scaffolder context before write.
+files:
+  - src: content/backend/app/core/clerk.py
+    dst: backend/app/core/clerk.py
+  - src: content/frontend/src/auth/ClerkProvider.tsx
+    dst: frontend/src/auth/ClerkProvider.tsx
+
+# Anchor-based patches into the base template. The scaffolder locates the
+# anchor and inserts `insert` on the line *after* it. Missing anchor = fail.
+patches:
+  - file: backend/app/api/main.py
+    anchor: "# <<ALLOY_DEPS_IMPORT>>"
+    insert: "from app.core.clerk import verify_clerk_jwt  # noqa: F401"
+  - file: frontend/src/main.tsx
+    anchor: "{/* <<ALLOY_PROVIDER_WRAP>> */}"
+    insert: |
+      import { ClerkAuthProvider } from "@/auth/ClerkProvider";
+
+# Conflicts with other blocks (scaffolder refuses to apply both).
+conflicts:
+  - auth/fastapi_users_jwt
+  - auth/custom_jwt

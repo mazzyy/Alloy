@@ -1,0 +1,35 @@
+name: storage/r2
+version: 0.1.0
+description: |
+  Cloudflare R2 object storage. Presigned uploads, server-side retrieval, zero
+  egress for preview/bundle downloads (roadmap §8). Uses the S3-compatible
+  endpoint so any S3 SDK works — we standardize on boto3 for parity with the
+  broader ecosystem.
+
+python_dependencies:
+  - "boto3>=1.35.0,<2.0.0"
+  - "botocore>=1.35.0,<2.0.0"
+
+js_dependencies: {}
+
+env_vars:
+  R2_ACCOUNT_ID: ""
+  R2_ACCESS_KEY_ID: ""
+  R2_SECRET_ACCESS_KEY: ""
+  R2_BUCKET: ""
+  R2_PUBLIC_BASE_URL: ""
+
+files:
+  - src: content/backend/app/core/r2.py
+    dst: backend/app/core/r2.py
+  - src: content/backend/app/api/routes/uploads.py
+    dst: backend/app/api/routes/uploads.py
+
+patches:
+  - file: backend/app/api/main.py
+    anchor: "# <<ALLOY_ROUTER_REGISTER>>"
+    insert: |
+      from app.api.routes import uploads
+      app.include_router(uploads.router, prefix="/api/uploads", tags=["uploads"])
+
+conflicts: []

@@ -36,6 +36,10 @@ dependencies = [
     "pydantic-ai-slim[openai]>=1.0.0,<2.0.0",
     "langgraph>=1.0.0,<2.0.0",
 
+    # Scaffolder (Copier wraps Jinja + renders the base template)
+    "copier>=9.4.0,<10.0.0",
+    "pyyaml>=6.0.1,<7.0.0",
+
     # Jobs / queue
     "arq>=0.26.3,<1.0.0",
     "redis>=5.2.0,<6.0.0",
@@ -87,7 +91,7 @@ exclude = ["alembic", "tests"]
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
-module = ["litellm.*", "arq.*", "slowapi.*", "langgraph.*"]
+module = ["litellm.*", "arq.*", "slowapi.*", "langgraph.*", "copier.*", "yaml"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

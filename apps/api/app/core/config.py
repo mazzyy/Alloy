@@ -123,6 +123,20 @@ class Settings(BaseSettings):
     DAYTONA_API_URL: str | None = None
     DAYTONA_API_KEY: str | None = None
 
+    # ─── Local sandbox manager (Phase 1 wk3-4 stand-in for Daytona) ─
+    # Where sandbox workspaces are materialised on disk. Each project gets
+    # its own subdirectory: <root>/<tenant>/<project_slug>-<short_uuid>/.
+    # We default to the XDG cache dir so we don't pollute $HOME or hijack
+    # the repo root during local dev.
+    ALLOY_WORKSPACES_ROOT: str = "~/.alloy/workspaces"
+    # Port range for allocated per-sandbox frontend/backend publish ports.
+    # The probing allocator scans this range, picking ports that are both
+    # free on the host and not already claimed by another live sandbox.
+    SANDBOX_PORT_RANGE_START: int = 20000
+    SANDBOX_PORT_RANGE_END: int = 29999
+    # Docker binary name (overridable for podman/nerdctl-compose shims).
+    DOCKER_BINARY: str = "docker"
+
     GITHUB_APP_ID: str | None = None
     GITHUB_APP_PRIVATE_KEY: str | None = None  # PEM contents
 

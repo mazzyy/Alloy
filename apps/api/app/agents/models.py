@@ -79,4 +79,5 @@ def default_settings(
     return OpenAIChatModelSettings(
         openai_reasoning_effort=reasoning_effort,  # type: ignore[typeddict-item]
         max_tokens=max_output_tokens,
+        extra_body={"text": {"verbosity": verbosity}},
     )
