@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -19,7 +19,7 @@ class SandboxError(RuntimeError):
     """Any sandbox lifecycle failure — boot, archive, resume, exec, git."""
 
 
-class SandboxStatus(str, Enum):
+class SandboxStatus(StrEnum):
     """Lifecycle states a sandbox moves through.
 
     `created` → `booting` → `running` → `archived` → `running` (on resume)
