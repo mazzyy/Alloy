@@ -108,11 +108,11 @@ def _build_retry_prompt(report: ValidatorReport, attempt: int, max_attempts: int
 
 
 async def _run_agent_once(
-    agent: "Agent[CoderDeps, str]",
+    agent: Agent[CoderDeps, str],
     prompt: str,
     deps: CoderDeps,
-    message_history: list["ModelMessage"] | None,
-) -> tuple[str, list["ModelMessage"], str | None]:
+    message_history: list[ModelMessage] | None,
+) -> tuple[str, list[ModelMessage], str | None]:
     """Invoke the Coder Agent once. Returns `(output, messages, error)`.
 
     On crash we return the exception repr as `error` and the prompt as
@@ -141,7 +141,7 @@ async def run_task_with_validators(
     *,
     validator_targets: list[str] | None = None,
     max_attempts: int = 3,
-    agent: "Agent[CoderDeps, str] | None" = None,
+    agent: Agent[CoderDeps, str] | None = None,
 ) -> ValidatorLoopResult:
     """Run one BuildPlan task with automatic validator-feedback retries.
 
@@ -194,7 +194,7 @@ async def run_task_with_validators(
 
     targets = validator_targets or ["python"]
     attempts: list[ValidatorLoopAttempt] = []
-    message_history: list["ModelMessage"] | None = None
+    message_history: list[ModelMessage] | None = None
     current_prompt = task_prompt
 
     log = deps.bind(
@@ -340,7 +340,7 @@ async def run_task_with_validators(
     )
 
 
-def _count_turns(messages: list["ModelMessage"]) -> int:
+def _count_turns(messages: list[ModelMessage]) -> int:
     """Count ModelResponse entries in the message log.
 
     Approximates "how many times did the model speak this attempt" — the

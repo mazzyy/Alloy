@@ -9,7 +9,7 @@
 | Phase | Status | Summary |
 |-------|--------|---------|
 | **Phase 0 — Foundation** | ✅ Complete | Monorepo, Docker Compose, FastAPI gateway, Clerk auth, Azure OpenAI wiring, CI |
-| **Phase 1 — Core Generation** | ✅ Complete | Spec Agent, Planner Agent, AppSpec/BuildPlan schemas, project persistence, streaming SSE endpoints, Build page UI, LiteLLM router |
+| **Phase 1 — Core Generation** | ✅ Complete | Spec Agent, Planner Agent, **Coder Agent + LangGraph build loop**, AppSpec/BuildPlan schemas, project persistence, streaming SSE endpoints (incl. `/build/run`, `/build/resume`), **deterministic scaffolder + blocks (`auth/clerk`, `auth/jwt`, `storage/r2`)**, **per-project sandboxes**, **deterministic post-build finalise** (alembic + openapi + ts client + smoke), **Monaco IDE shell with Sandpack lite preview**, LiteLLM router |
 | Phase 2 — Surgical Edits | 🔲 Next | Morph Fast-Apply, visual element picker, checkpoints |
 | Phase 3 — GitHub + Docker + Vercel | 🔲 | One-click deploy pipeline |
 | Phase 4 — Production Hardening | 🔲 | Billing, RLS, prompt-injection defenses |
@@ -347,11 +347,82 @@ Three-stage wizard:
 - `stream()` — raw SSE for token streaming (echo endpoint)
 - `streamJson<TStatus, TResult>()` — structured SSE for agent endpoints with typed `onStatus` / `onResult` / `onError` handlers
 
+#### Coder Agent (`app/agents/coder/`)
+
+The Pydantic AI agent that turns a `BuildPlan` into actual files in a project workspace, driven by the LangGraph outer loop.
+
+- **Tool schema** mirrors Claude Code: `list_files`, `read_file`, `write_file`, `apply_patch` (unified diff), `search_code`, `ast_summary`, `run_command` (allow-listed: `alembic`, `pytest`, `ruff`, `mypy`, `npm`, `tsc`, `eslint`, `vitest`, `uv`, `npx playwright`), `run_validators`, `openapi_export`, `regenerate_client`, `alembic_autogenerate`, `git_commit`, `request_human_review`
+- **Validator loop** — after each write, runs `ruff check --fix` + `mypy` + `pytest -x` (Python) and `tsc --noEmit` + `eslint` + `vitest run` (frontend). Top-N diagnostics fed back as targeted "fix these errors" prompts; max 3 attempts per task before surfacing for human review.
+- **Per-task git commits** in the project workspace so `git reset --hard <sha>` is always a valid rollback.
+- **`request_human_review`** raises a LangGraph `interrupt()` — the build pauses, the run row goes to `needs_review`, and the IDE prompts the user to answer; `/build/resume` continues from the checkpoint without re-running prior tasks.
+
+#### Deterministic Scaffolder + Blocks (`app/scaffold/`, `blocks/`)
+
+Generation cost is cut ~60–70% by **never asking the LLM to write boilerplate**. The scaffolder forks the canonical base template (`templates/base-react-fastapi`) into the project workspace and then overlays composable, versioned **feature blocks** at named anchors.
+
+- **`load_catalogue(BLOCKS_DIR)`** discovers blocks at startup with manifest validation
+- **Anchor-based patching** — each block declares `<file, anchor, insert>` patches; missing anchors fail the build loudly
+- **Conflict detection** — e.g. `auth/clerk` ↔ `auth/jwt` are mutually exclusive
+- **Phase 1 ships three blocks**: `auth/clerk` (JWKS + `<ClerkProvider>`), `auth/jwt` (self-hosted HS256 + bcrypt + `current_user` dep + `useIdentity()` hook), `storage/r2` (presigned uploads)
+- The Planner Agent's `resolve_blocks_for_spec()` deterministically maps `AppSpec.auth.provider` + `integrations[*].kind` → block list before any LLM call
+
+#### Per-project Sandboxes (`app/sandboxes/`)
+
+Each project gets its own workspace directory + (locally) a docker-compose stack with deterministic port allocation; in production this swaps for Daytona Cloud sandboxes.
+
+- **`LocalSandboxManager`** — port allocation from a `port_state.json` ledger, `compose.override.yml` generation, `git init` + initial commit, idle archive
+- **Workspace lifecycle** — `ensure_workspace_for_build()` either resumes an existing sandbox or scaffolds a new one from the spec + plan; `archive_sandbox_safely()` keeps idle COGS down
+- **Reused by both the build SSE route and the IDE's sandbox preview** — clicking "Run backend" boots the same workspace
+
+#### Build SSE Endpoints (`app/api/routes/build.py`)
+
+The build loop is exposed end-to-end as Server-Sent Events so the IDE can render per-task progress as it lands:
+
+```
+event: status   data: {"phase": "init", "thread_id": "project:<uuid>"}
+event: status   data: {"phase": "scaffolded", "workspace": "...", "sandbox_id": "..."}
+event: status   data: {"phase": "build_started", "tasks_total": N}
+event: status   data: {"phase": "task_finished", "task_id": "...", "ok": true, ...}
+event: status   data: {"phase": "finalise_started"}
+event: status   data: {"phase": "finalise_finished", "ok": true, "steps": [...]}
+event: result   data: {"run_id": "...", "ok": true, "outcomes": [...], "finalise": {...}}
+```
+
+`POST /build/resume` continues a run paused on `needs_review`. `GET /build/runs/{id}` and `GET /build/runs?project_id=` power the IDE history pane.
+
+#### Deterministic Post-build Finalise (`app/services/finalise.py`)
+
+After a clean LangGraph outcome, an LLM-free pipeline guarantees four things happen — even if the model dropped the corresponding plan tasks:
+
+1. **`alembic upgrade head`** — applies any migrations the agent generated
+2. **`openapi.json` export** — from the live backend (uvicorn-in-sandbox or in-process fallback)
+3. **`@hey-api/openapi-ts` regen** — typed TS client + TanStack Query hooks committed back to `frontend/`
+4. **`npx playwright test --grep '@smoke'`** — best-effort smoke run; failures are reported but don't fail the build
+
+Each step is reported as a `FinaliseStep(name, ok, skipped, return_code, stdout_tail, stderr_tail)` so the IDE can render a per-step status line.
+
+#### IDE Shell (`apps/web/src/components/ide/`, `pages/Build.tsx`)
+
+The Build page is a real Monaco IDE rather than a wizard:
+
+- **Three-pane layout** — file tree, Monaco editor with tabs, chat / build stream, plus a toggleable preview pane
+- **Live chat panel** drives the full lifecycle: `proposeSpec` → `editing_spec` → `generatePlan` → `runBuild` → `needs_review`/`done`
+- **Sandpack lite preview** while the backend boots (instant React render with mocked routes from the OpenAPI schema), Daytona-backed full preview on demand
+- **Resume UI** — when the Coder Agent paused for review, the chat panel renders the question + quick-pick option chips + free-text answer, all wired to `/build/resume`
+- **Status bar** — file count, git branch, sandbox state, build stage badge
+
 #### Tests
 
 - `test_spec_agent.py` — Spec Agent with `TestModel` override (no Azure creds needed)
-- `test_planner_agent.py` — Planner Agent with `TestModel` + deterministic block resolver
+- `test_planner_agent.py` — Planner Agent + deterministic block resolver (covers `clerk`, `custom_jwt`, `fastapi_users_jwt`)
+- `test_scaffold.py` — Synthetic-template scaffolder tests (block apply, anchor missing, conflict detection)
+- `test_build_graph.py`, `test_build_topo.py` — LangGraph state machine + topological ordering
+- `test_coder_tools_*.py` — One file per tool family (files, commands, patch, codegen, search/AST, validators, git/review)
+- `test_coder_agent.py` — End-to-end agent loop with mocked LLM
+- `test_coder_validator_loop.py` — Per-task validator retry behaviour
+- `test_sandbox_*.py` — Compose generation, port allocation, git ops, manager lifecycle
 - `test_health.py` — Health/readiness endpoint integration tests
+- `test_llm_router.py` — LiteLLM router cascade ordering
 
 ---
 
@@ -374,6 +445,18 @@ POST /api/v1/spec/save       → SpecEnvelope (idempotent on SHA)
 GET  /api/v1/spec/{id}       → SpecEnvelope
 POST /api/v1/plan/build      → SSE: status events → PlanEnvelope (project_id, plan)
 GET  /api/v1/plan/{id}       → PlanEnvelope
+
+POST /api/v1/build/run       → SSE: scaffolded → build_started → task_finished*
+                                → finalise_started/finished → result (BuildOutcome)
+POST /api/v1/build/resume    → SSE: resume a build paused on request_human_review
+GET  /api/v1/build/runs/{id} → Run detail (outcome + pending_review)
+GET  /api/v1/build/runs      → ?project_id=… : last N runs for the history pane
+
+GET  /api/v1/files/tree      → ?project_id=… : workspace file tree
+GET  /api/v1/files/read      → ?project_id=…&path=… : single file contents
+GET  /api/v1/sandbox/state   → ?project_id=… : sandbox lifecycle (running/booting/…)
+POST /api/v1/sandbox/start   → boot the per-project Daytona/local docker-compose stack
+POST /api/v1/sandbox/stop    → archive the sandbox
 ```
 
 ---

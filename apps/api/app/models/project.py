@@ -125,3 +125,63 @@ class BuildPlanVersion(SQLModel, table=True):
     __table_args__ = (
         UniqueConstraint("project_id", "version", name="uq_plan_versions_project_version"),
     )
+
+
+class BuildRun(SQLModel, table=True):
+    """One execution of a BuildPlan through the LangGraph build loop.
+
+    A new BuildRun row is created the moment `POST /api/v1/build/run` enters
+    its SSE handler. We persist progress incrementally (status + tasks_run +
+    pending_review) so the UI can reattach to an in-flight run and so we have
+    a permanent audit trail of what got executed.
+
+    Status values:
+        "running"        — the LangGraph loop is actively running.
+        "succeeded"      — every task green, repo committed.
+        "failed"         — at least one task exhausted retries.
+        "needs_review"   — paused on a `request_human_review` interrupt.
+        "crashed"        — the SSE generator itself crashed (rare).
+    """
+
+    __tablename__ = "build_runs"
+
+    id: UUID = Field(default_factory=uuid4, primary_key=True)
+    project_id: UUID = Field(foreign_key="projects.id", index=True, nullable=False)
+    tenant_id: str = Field(index=True, nullable=False)
+    plan_version_id: UUID = Field(foreign_key="build_plan_versions.id", nullable=False)
+
+    # LangGraph thread_id — `project:<uuid>` by default. Required for
+    # `resume_build()` after a needs_review pause.
+    thread_id: str = Field(nullable=False)
+
+    # Sandbox the build wrote into. Optional — adhoc builds without a
+    # sandbox (tests, CLI runs) leave this null.
+    sandbox_id: str | None = Field(default=None, nullable=True)
+
+    status: str = Field(default="running", nullable=False)
+
+    tasks_total: int = Field(default=0, nullable=False)
+    tasks_run: int = Field(default=0, nullable=False)
+
+    # Final outcome payload (mirror of `BuildOutcome.model_dump()`). Populated
+    # when the run terminates so a re-fetch shows the same per-task summary
+    # the SSE stream emitted live.
+    outcome_json: dict[str, Any] | None = Field(
+        default=None, sa_column=Column(JSONB, nullable=True)
+    )
+
+    # Pending human-review payload while status="needs_review". Cleared on
+    # resume.
+    pending_review: dict[str, Any] | None = Field(
+        default=None, sa_column=Column(JSONB, nullable=True)
+    )
+
+    error: str | None = Field(default=None, nullable=True)
+
+    started_at: datetime = Field(default_factory=_utcnow, nullable=False)
+    ended_at: datetime | None = Field(default=None, nullable=True)
+
+    __table_args__ = (
+        Index("ix_build_runs_project_started", "project_id", "started_at"),
+        Index("ix_build_runs_tenant_status", "tenant_id", "status"),
+    )

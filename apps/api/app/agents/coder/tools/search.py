@@ -286,12 +286,12 @@ def _ast_summary(root: Path, rel: str) -> AstSummary:
     return AstSummary(path=rel_path, language=summary.language, symbols=summary.symbols)
 
 
-def register(agent: "Agent[CoderDeps, str]") -> None:
+def register(agent: Agent[CoderDeps, str]) -> None:
     """Attach `search_code` and `ast_summary`."""
 
     @agent.tool
     async def search_code(
-        ctx: "RunContext[CoderDeps]",
+        ctx: RunContext[CoderDeps],
         query: str,
         k: int = 20,
     ) -> SearchHits:
@@ -307,7 +307,7 @@ def register(agent: "Agent[CoderDeps, str]") -> None:
 
     @agent.tool
     async def ast_summary(
-        ctx: "RunContext[CoderDeps]",
+        ctx: RunContext[CoderDeps],
         path: str,
     ) -> AstSummary:
         """Return a structural summary of a Python or TypeScript file —

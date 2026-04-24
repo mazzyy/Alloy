@@ -181,7 +181,7 @@ def _validate_binary(binary: str) -> None:
 
 
 async def run_command(
-    deps: "CoderDeps",
+    deps: CoderDeps,
     binary: str,
     args: list[str] | None = None,
     *,
@@ -222,12 +222,12 @@ def _split_command(cmd: str) -> tuple[str, list[str]]:
     return parts[0], parts[1:]
 
 
-def register(agent: "Agent[CoderDeps, str]") -> None:
+def register(agent: Agent[CoderDeps, str]) -> None:
     """Attach `run_command` to `agent`."""
 
     @agent.tool
     async def run_command_tool(
-        ctx: "RunContext[CoderDeps]",
+        ctx: RunContext[CoderDeps],
         command: str,
         args: list[str] | None = None,
         timeout_s: int = 60,

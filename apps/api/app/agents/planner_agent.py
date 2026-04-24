@@ -38,6 +38,12 @@ _PROMPTS_DIR = Path(__file__).parent / "prompts"
 # Alloy's initial block catalogue. Extend as Phase 1 wk3 ships more blocks.
 _BLOCK_CATALOGUE: dict[str, set[str]] = {
     "clerk": {"auth/clerk"},
+    # Both `fastapi_users_jwt` and `custom_jwt` AppSpec auth providers map
+    # to the same self-hosted JWT block — the difference between them is a
+    # surface-level "do we want fastapi_users' helper or roll our own
+    # router". Phase 1 ships one canonical implementation; Phase 2 can
+    # split if usage tells us it's worth two.
+    "jwt": {"auth/jwt"},
     "r2": {"storage/r2"},
     "stripe": {"billing/stripe-subscriptions"},
     "resend": {"email/resend"},
@@ -55,8 +61,11 @@ def resolve_blocks_for_spec(spec: AppSpec) -> list[str]:
     blocks: set[str] = set()
 
     # Auth provider → block
-    if spec.auth.provider.value == "clerk":
+    provider = spec.auth.provider.value
+    if provider == "clerk":
         blocks.update(_BLOCK_CATALOGUE["clerk"])
+    elif provider in {"fastapi_users_jwt", "custom_jwt"}:
+        blocks.update(_BLOCK_CATALOGUE["jwt"])
 
     # Integrations → blocks
     for integ in spec.integrations:

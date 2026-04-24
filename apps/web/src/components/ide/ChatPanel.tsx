@@ -37,6 +37,10 @@ interface ChatPanelProps {
   onProposeSpec: (prompt: string) => void;
   onSaveSpec: (spec: AppSpec) => void;
   onGeneratePlan: () => void;
+  onRunBuild?: () => void;
+  onResumeBuild?: (answer: string) => void;
+  pendingReviewQuestion?: string | null;
+  pendingReviewOptions?: string[];
   className?: string;
 }
 
@@ -120,8 +124,13 @@ export function ChatPanel({
   onProposeSpec,
   onSaveSpec,
   onGeneratePlan,
+  onRunBuild,
+  onResumeBuild,
+  pendingReviewQuestion,
+  pendingReviewOptions,
   className,
 }: ChatPanelProps) {
+  const [reviewAnswer, setReviewAnswer] = useState("");
   const [promptText, setPromptText] = useState(
     "Build a lightweight task tracker for a small product team. " +
       "Users should be able to create, assign, and close tasks. " +
@@ -222,16 +231,66 @@ export function ChatPanel({
         </div>
       )}
 
-      {/* Plan complete — show build button */}
-      {stage === "done" && (
+      {/* Plan complete — fire the Coder Agent */}
+      {stage === "done" && onRunBuild && (
         <div className="border-t border-border p-3">
-          <Button disabled className="w-full" size="sm">
+          <Button
+            className="w-full"
+            size="sm"
+            onClick={onRunBuild}
+          >
             <Sparkles className="mr-2 h-3.5 w-3.5" />
-            Build (Coder Agent — coming soon)
+            Build with Coder Agent
           </Button>
           <p className="mt-1.5 text-center text-[10px] text-muted-foreground">
-            The Coder Agent endpoint is not wired yet. The plan above is ready to execute.
+            Runs every plan task through the Coder Agent + validators,
+            then exports OpenAPI and regenerates the TS client.
           </p>
+        </div>
+      )}
+
+      {/* Paused on `request_human_review` — collect the answer */}
+      {stage === "needs_review" && onResumeBuild && (
+        <div className="border-t border-border p-3">
+          <p className="mb-2 text-xs font-medium">
+            Coder Agent paused for review
+          </p>
+          {pendingReviewQuestion && (
+            <p className="mb-2 text-[11px] leading-relaxed text-muted-foreground">
+              {pendingReviewQuestion}
+            </p>
+          )}
+          {pendingReviewOptions && pendingReviewOptions.length > 0 && (
+            <div className="mb-2 flex flex-wrap gap-1">
+              {pendingReviewOptions.map((opt) => (
+                <Button
+                  key={opt}
+                  variant="outline"
+                  size="sm"
+                  onClick={() => onResumeBuild(opt)}
+                >
+                  {opt}
+                </Button>
+              ))}
+            </div>
+          )}
+          <textarea
+            className="mb-2 h-20 w-full resize-y rounded-md border border-input bg-background px-3 py-2 text-xs"
+            placeholder="Or type your answer…"
+            value={reviewAnswer}
+            onChange={(e) => setReviewAnswer(e.target.value)}
+          />
+          <Button
+            className="w-full"
+            size="sm"
+            disabled={!reviewAnswer.trim()}
+            onClick={() => {
+              onResumeBuild(reviewAnswer.trim());
+              setReviewAnswer("");
+            }}
+          >
+            Resume build
+          </Button>
         </div>
       )}
 

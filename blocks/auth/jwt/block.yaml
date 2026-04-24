@@ -1,0 +1,60 @@
+name: auth/jwt
+version: 0.1.0
+description: |
+  Self-hosted JWT auth. The generated FastAPI backend signs short-lived
+  HS256 access tokens itself (no third-party identity provider). Includes
+  password hashing via passlib/bcrypt, a `/api/v1/auth/login` token
+  endpoint, a `/api/v1/auth/register` signup endpoint (gated on
+  `auth.allow_signup`), and a FastAPI `current_user` dependency that
+  decodes the bearer token and resolves the User row.
+
+  The frontend ships a `useIdentity()` hook + a JWT-aware `apiFetch`
+  helper that stores the token in `sessionStorage`. The shape mirrors
+  the Clerk block's hook so app code only differs in the provider wrap.
+
+# Python deps appended to the generated project's pyproject.toml.
+python_dependencies:
+  - "pyjwt[crypto]>=2.9.0,<3.0.0"
+  - "passlib[bcrypt]>=1.7.4,<2.0.0"
+  - "python-multipart>=0.0.9,<1.0.0"  # required for OAuth2PasswordRequestForm
+
+# JS deps — none. The hook lives in plain TS without an SDK dependency.
+js_dependencies: {}
+
+# Env vars appended to .env.example with placeholder values.
+env_vars:
+  ALLOY_JWT_SECRET: "change-me-to-a-32-byte-urlsafe-secret"
+  ALLOY_JWT_AUDIENCE: ""
+  ALLOY_JWT_ISSUER: "alloy-app"
+  ALLOY_JWT_TTL_MINUTES: "60"
+
+# Files overlaid into the rendered project. Paths ending in `.jinja` are
+# templated; the rest are copied verbatim.
+files:
+  - src: content/backend/app/core/jwt_auth.py
+    dst: backend/app/core/jwt_auth.py
+  - src: content/backend/app/api/routes/auth.py
+    dst: backend/app/api/routes/auth.py
+  - src: content/frontend/src/auth/JwtProvider.tsx
+    dst: frontend/src/auth/JwtProvider.tsx
+
+# Anchor-based patches into the base template. The scaffolder locates
+# the anchor and inserts `insert` on the line *after* it. Missing
+# anchor = fail (loud — better than silently mis-wiring auth).
+patches:
+  - file: backend/app/api/main.py
+    anchor: "# <<ALLOY_DEPS_IMPORT>>"
+    insert: "from app.core.jwt_auth import current_user  # noqa: F401"
+  - file: backend/app/api/main.py
+    anchor: "# <<ALLOY_ROUTER_INCLUDE>>"
+    insert: |
+      from app.api.routes.auth import router as _alloy_jwt_auth_router
+      api_router.include_router(_alloy_jwt_auth_router)
+  - file: frontend/src/main.tsx
+    anchor: "{/* <<ALLOY_PROVIDER_WRAP>> */}"
+    insert: |
+      import { JwtAuthProvider } from "@/auth/JwtProvider";
+
+# Conflicts with other auth providers — scaffolder refuses both.
+conflicts:
+  - auth/clerk

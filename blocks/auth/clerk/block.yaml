@@ -42,5 +42,6 @@ patches:
 
 # Conflicts with other blocks (scaffolder refuses to apply both).
 conflicts:
+  - auth/jwt
   - auth/fastapi_users_jwt
   - auth/custom_jwt

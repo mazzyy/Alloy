@@ -42,6 +42,7 @@ import { PreviewPanel } from "@/components/ide/PreviewPanel";
 import { useFileTree } from "@/hooks/useFileTree";
 import { useEditorTabs } from "@/hooks/useEditorTabs";
 import { useBuildStream } from "@/hooks/useBuildStream";
+import { useSandboxPreview } from "@/hooks/useSandboxPreview";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/cn";
 import type { AppSpec } from "@alloy/shared";
@@ -59,6 +60,9 @@ export function IDELayout({ initialProjectId }: IDELayoutProps) {
   /* ── Build stream ─────────────────────────────────────────── */
   const build = useBuildStream();
   const effectiveProjectId = initialProjectId ?? build.projectId;
+
+  /* ── Sandbox preview (Daytona full preview) ──────────────── */
+  const sandbox = useSandboxPreview(effectiveProjectId);
 
   /* ── Editor tabs ──────────────────────────────────────────── */
   const editor = useEditorTabs(effectiveProjectId);
@@ -175,6 +179,7 @@ export function IDELayout({ initialProjectId }: IDELayoutProps) {
               build={build}
               chatOpen={chatOpen}
               previewOpen={previewOpen}
+              sandboxPreviewUrl={sandbox.previewUrl}
               onSaveSpec={handleSaveSpec}
             />
           </Resizable>
@@ -184,6 +189,7 @@ export function IDELayout({ initialProjectId }: IDELayoutProps) {
             build={build}
             chatOpen={chatOpen}
             previewOpen={previewOpen}
+            sandboxPreviewUrl={sandbox.previewUrl}
             onSaveSpec={handleSaveSpec}
           />
         )}
@@ -202,6 +208,21 @@ export function IDELayout({ initialProjectId }: IDELayoutProps) {
           <span>main</span>
         </div>
         <div className="flex-1" />
+        {sandbox.status !== "none" && (
+          <Badge
+            variant={
+              sandbox.status === "running"
+                ? "success"
+                : sandbox.status === "booting"
+                  ? "accent"
+                  : sandbox.status === "failed"
+                    ? "destructive"
+                    : "default"
+            }
+          >
+            sandbox: {sandbox.status}
+          </Badge>
+        )}
         <Badge
           variant={
             build.stage === "done"
@@ -227,6 +248,7 @@ interface EditorChatAreaProps {
   build: ReturnType<typeof useBuildStream>;
   chatOpen: boolean;
   previewOpen: boolean;
+  sandboxPreviewUrl: string | null;
   onSaveSpec: (spec: AppSpec) => void;
 }
 
@@ -235,6 +257,7 @@ function EditorChatArea({
   build,
   chatOpen,
   previewOpen,
+  sandboxPreviewUrl,
   onSaveSpec,
 }: EditorChatAreaProps) {
   const editorContent = previewOpen ? (
@@ -245,7 +268,7 @@ function EditorChatArea({
         onSelectTab={editor.setActiveIdx}
         onCloseTab={editor.closeTab}
       />
-      <PreviewPanel previewUrl={null} />
+      <PreviewPanel spec={build.specEnv?.spec ?? null} previewUrl={sandboxPreviewUrl} />
     </Resizable>
   ) : (
     <EditorPanel
@@ -277,6 +300,14 @@ function EditorChatArea({
           onProposeSpec={build.proposeSpec}
           onSaveSpec={onSaveSpec}
           onGeneratePlan={build.generatePlan}
+          onRunBuild={build.runBuild}
+          onResumeBuild={build.resumeBuild}
+          pendingReviewQuestion={
+            build.buildResult?.pending_review?.question ?? null
+          }
+          pendingReviewOptions={
+            build.buildResult?.pending_review?.options ?? []
+          }
         />
       </div>
     </div>

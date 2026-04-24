@@ -192,12 +192,12 @@ def _write_file(root: Path, rel: str, content: str) -> WriteResult:
     return WriteResult(path=rel_to(root, path), bytes_written=len(data), created=True)
 
 
-def register(agent: "Agent[CoderDeps, str]") -> None:
+def register(agent: Agent[CoderDeps, str]) -> None:
     """Attach `list_files`, `read_file`, `write_file` to `agent`."""
 
     @agent.tool
     async def list_files(
-        ctx: "RunContext[CoderDeps]",
+        ctx: RunContext[CoderDeps],
         path: str = ".",
         pattern: str | None = None,
     ) -> FileList:
@@ -212,7 +212,7 @@ def register(agent: "Agent[CoderDeps, str]") -> None:
 
     @agent.tool
     async def read_file(
-        ctx: "RunContext[CoderDeps]",
+        ctx: RunContext[CoderDeps],
         path: str,
         start_line: int | None = None,
         end_line: int | None = None,
@@ -229,7 +229,7 @@ def register(agent: "Agent[CoderDeps, str]") -> None:
 
     @agent.tool
     async def write_file(
-        ctx: "RunContext[CoderDeps]",
+        ctx: RunContext[CoderDeps],
         path: str,
         content: str,
     ) -> WriteResult:

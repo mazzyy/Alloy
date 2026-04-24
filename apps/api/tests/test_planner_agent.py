@@ -28,9 +28,14 @@ def test_resolve_blocks_default_clerk() -> None:
     assert resolve_blocks_for_spec(_base_spec()) == ["auth/clerk"]
 
 
-def test_resolve_blocks_non_clerk_auth_skips_clerk_block() -> None:
+def test_resolve_blocks_non_clerk_auth_picks_jwt_block() -> None:
     spec = _base_spec(auth=AuthConfig(provider=AuthProvider.custom_jwt))
-    assert resolve_blocks_for_spec(spec) == []
+    assert resolve_blocks_for_spec(spec) == ["auth/jwt"]
+
+
+def test_resolve_blocks_fastapi_users_jwt_picks_jwt_block() -> None:
+    spec = _base_spec(auth=AuthConfig(provider=AuthProvider.fastapi_users_jwt))
+    assert resolve_blocks_for_spec(spec) == ["auth/jwt"]
 
 
 def test_resolve_blocks_picks_integrations() -> None:

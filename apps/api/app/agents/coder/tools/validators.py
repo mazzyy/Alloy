@@ -302,7 +302,7 @@ def _parse_for(binary: str, cmd: CommandResult) -> list[ValidatorIssue]:
 
 
 async def run_validators(
-    deps: "CoderDeps",
+    deps: CoderDeps,
     targets: list[str] | None = None,
     *,
     paths: list[str] | None = None,
@@ -364,10 +364,10 @@ async def run_validators(
     )
 
 
-def register(agent: "Agent[CoderDeps, str]") -> None:
+def register(agent: Agent[CoderDeps, str]) -> None:
     @agent.tool
     async def run_validators_tool(
-        ctx: "RunContext[CoderDeps]",
+        ctx: RunContext[CoderDeps],
         targets: list[str] | None = None,
     ) -> ValidatorReport:
         """Run one or more validator suites and return the top issues.

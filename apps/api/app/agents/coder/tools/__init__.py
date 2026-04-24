@@ -45,7 +45,7 @@ ALL_TOOL_MODULES = (
 )
 
 
-def register_tools(agent: "Agent[CoderDeps, str]") -> None:
+def register_tools(agent: Agent[CoderDeps, str]) -> None:
     """Register every Coder Agent tool on `agent`.
 
     Pydantic AI's `@agent.tool` decorator attaches handlers to a specific

@@ -42,6 +42,10 @@ declare module "@tanstack/react-router" {
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <StrictMode>
+    {/* <<ALLOY_PROVIDER_WRAP>> */}
+    {/* Auth-block providers (auth/clerk, auth/jwt) inject their imports
+        below this anchor. The provider component is responsible for
+        wrapping its descendants in any required context. */}
     <ThemeProvider defaultTheme="dark" storageKey="vite-ui-theme">
       <QueryClientProvider client={queryClient}>
         <RouterProvider router={router} />

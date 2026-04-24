@@ -22,10 +22,10 @@ if TYPE_CHECKING:
     from pydantic_ai import Agent
 
 
-def register(agent: "Agent[CoderDeps, str]") -> None:
+def register(agent: Agent[CoderDeps, str]) -> None:
     @agent.tool
     async def request_human_review(
-        ctx: "RunContext[CoderDeps]",
+        ctx: RunContext[CoderDeps],
         question: str,
         options: list[str] | None = None,
     ) -> HumanReviewRequested:

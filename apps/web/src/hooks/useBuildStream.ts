@@ -34,6 +34,7 @@ export type BuildStage =
   | "editing_spec"
   | "planning"
   | "building"
+  | "needs_review"
   | "done"
   | "error";
 
@@ -53,6 +54,39 @@ interface PlanEnvelope {
   plan_version_id: string;
   plan_version: number;
   plan: BuildPlan;
+}
+
+interface BuildTaskOutcome {
+  task_id: string;
+  ok: boolean;
+  attempts_used: number;
+  commit_sha?: string | null;
+  summary?: string;
+  error?: string | null;
+}
+
+interface BuildResultEnvelope {
+  run_id: string;
+  thread_id: string;
+  ok: boolean;
+  tasks_run: number;
+  tasks_total: number;
+  outcomes: BuildTaskOutcome[];
+  pending_review: {
+    task_id: string;
+    question: string;
+    options: string[];
+  } | null;
+  finalise: {
+    ok: boolean;
+    steps: Array<{
+      name: string;
+      ok: boolean;
+      skipped: boolean;
+      return_code: number | null;
+      error: string | null;
+    }>;
+  } | null;
 }
 
 interface StatusEvent {
@@ -217,6 +251,176 @@ export function useBuildStream() {
     }
   }, [api, specEnv, specJsonText, saveSpec, addMessage]);
 
+  /* ── Run build (Coder Agent → workspace writes) ──────────────── */
+
+  const [buildResult, setBuildResult] = useState<BuildResultEnvelope | null>(
+    null,
+  );
+
+  const runBuild = useCallback(async () => {
+    if (!planEnv) return;
+
+    setStage("building");
+    setBuildResult(null);
+    addMessage("system", "Running Coder Agent…", "build");
+
+    try {
+      await api.streamJson<StatusEvent, BuildResultEnvelope>(
+        "/build/run",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            project_id: planEnv.project_id,
+            plan_version_id: planEnv.plan_version_id,
+          }),
+        },
+        {
+          onStatus: (s) => {
+            // Render the most useful sub-events as readable lines and
+            // hide the noisy ones behind data-only messages.
+            if (s.phase === "task_finished") {
+              const ok = s.ok as boolean;
+              const id = s.task_id as string;
+              const idx = (s.idx as number) + 1;
+              const total = s.total as number;
+              addMessage(
+                ok ? "tool" : "error",
+                `${ok ? "✓" : "✗"} [${idx}/${total}] ${id}`,
+                "coder",
+                s,
+              );
+            } else if (s.phase === "scaffolded") {
+              addMessage(
+                "system",
+                `Workspace ready (sandbox ${s.sandbox_id ?? "(none)"}).`,
+                "build",
+              );
+            } else if (s.phase === "build_started") {
+              addMessage(
+                "system",
+                `Build started — ${s.tasks_total} tasks queued.`,
+                "build",
+              );
+            } else if (s.phase === "finalise_started") {
+              addMessage(
+                "system",
+                "Running post-build finalisation (alembic + openapi + ts client)…",
+                "finalise",
+              );
+            } else if (s.phase === "finalise_finished") {
+              const stepsRaw = s.steps as
+                | Array<{ name: string; ok: boolean; skipped: boolean }>
+                | undefined;
+              const stepLine =
+                stepsRaw
+                  ?.map(
+                    (st) =>
+                      `${st.skipped ? "·" : st.ok ? "✓" : "✗"} ${st.name}`,
+                  )
+                  .join("  ") ?? "(no steps)";
+              addMessage(
+                s.ok ? "tool" : "error",
+                `Finalisation ${s.ok ? "complete" : "had failures"}: ${stepLine}`,
+                "finalise",
+                s,
+              );
+            } else if (s.phase === "finalise_crashed") {
+              addMessage(
+                "error",
+                `Finalisation crashed: ${s.error ?? "(unknown)"}`,
+                "finalise",
+              );
+            } else {
+              addMessage("system", `Phase: ${s.phase}`, "build", s);
+            }
+          },
+          onResult: (env) => {
+            setBuildResult(env);
+            const tail = env.pending_review
+              ? `Paused for review: ${env.pending_review.question}`
+              : env.ok
+                ? `Build green — ${env.tasks_run}/${env.tasks_total} tasks succeeded.`
+                : `Build failed — ${env.tasks_run}/${env.tasks_total} tasks attempted.`;
+            addMessage(
+              env.ok ? "assistant" : "error",
+              tail,
+              "coder",
+              env,
+            );
+            setStage(
+              env.pending_review ? "needs_review" : env.ok ? "done" : "error",
+            );
+          },
+          onError: (err) => {
+            addMessage("error", err, "build");
+            setStage("error");
+          },
+        },
+      );
+    } catch (e) {
+      addMessage(
+        "error",
+        e instanceof Error ? e.message : String(e),
+        "build",
+      );
+      setStage("error");
+    }
+  }, [api, planEnv, addMessage]);
+
+  /* ── Resume build (after needs_review) ───────────────────────── */
+
+  const resumeBuild = useCallback(
+    async (answer: string) => {
+      if (!buildResult || !buildResult.run_id) return;
+      setStage("building");
+      addMessage("user", answer, "review");
+
+      try {
+        await api.streamJson<StatusEvent, BuildResultEnvelope>(
+          "/build/resume",
+          {
+            method: "POST",
+            body: JSON.stringify({
+              run_id: buildResult.run_id,
+              answer,
+            }),
+          },
+          {
+            onStatus: (s) => {
+              addMessage("system", `Phase: ${s.phase}`, "build", s);
+            },
+            onResult: (env) => {
+              setBuildResult(env);
+              addMessage(
+                env.ok ? "assistant" : "error",
+                env.ok
+                  ? `Resumed and built green.`
+                  : `Resumed but build failed.`,
+                "coder",
+                env,
+              );
+              setStage(
+                env.pending_review ? "needs_review" : env.ok ? "done" : "error",
+              );
+            },
+            onError: (err) => {
+              addMessage("error", err, "build");
+              setStage("error");
+            },
+          },
+        );
+      } catch (e) {
+        addMessage(
+          "error",
+          e instanceof Error ? e.message : String(e),
+          "build",
+        );
+        setStage("error");
+      }
+    },
+    [api, buildResult, addMessage],
+  );
+
   /* ── Reset ───────────────────────────────────────────────────── */
 
   const reset = useCallback(() => {
@@ -227,6 +431,7 @@ export function useBuildStream() {
     setPlanEnv(null);
     setProjectId(null);
     setSpecJsonText("");
+    setBuildResult(null);
   }, []);
 
   return {
@@ -240,6 +445,9 @@ export function useBuildStream() {
     proposeSpec,
     saveSpec,
     generatePlan,
+    runBuild,
+    resumeBuild,
+    buildResult,
     reset,
     addMessage,
   };

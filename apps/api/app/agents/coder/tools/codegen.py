@@ -25,8 +25,8 @@ from pydantic_ai import RunContext
 from app.agents.coder.context import CoderDeps
 from app.agents.coder.errors import HumanReviewRequired, ToolInputError
 from app.agents.coder.results import AlembicResult, CommandResult
-from app.agents.coder.tools.commands import run_command
 from app.agents.coder.tools._paths import rel_to
+from app.agents.coder.tools.commands import run_command
 
 if TYPE_CHECKING:
     from pydantic_ai import Agent
@@ -52,7 +52,7 @@ _ALEMBIC_GENERATED_RE = re.compile(
 _ALEMBIC_REV_RE = re.compile(r"Generating.*?([a-f0-9]{12})[_.]", re.IGNORECASE)
 
 
-async def _openapi_export(deps: "CoderDeps") -> CommandResult:
+async def _openapi_export(deps: CoderDeps) -> CommandResult:
     """Runs the project's existing OpenAPI export script.
 
     The scaffold ships `apps/api/scripts/export_openapi.py`. If that
@@ -73,7 +73,7 @@ async def _openapi_export(deps: "CoderDeps") -> CommandResult:
     return await run_command(deps, "python", ["-c", one_liner], timeout_s=60)
 
 
-async def _regenerate_client(deps: "CoderDeps") -> CommandResult:
+async def _regenerate_client(deps: CoderDeps) -> CommandResult:
     """Regenerate the frontend TS client from `openapi.json`.
 
     Runs `npx @hey-api/openapi-ts` via the frontend service — the
@@ -98,7 +98,7 @@ def _scan_destructive(migration_path: Path) -> list[str]:
 
 
 async def _alembic_autogenerate(
-    deps: "CoderDeps",
+    deps: CoderDeps,
     message: str,
 ) -> AlembicResult:
     if not message or not message.strip():
@@ -146,9 +146,9 @@ async def _alembic_autogenerate(
     )
 
 
-def register(agent: "Agent[CoderDeps, str]") -> None:
+def register(agent: Agent[CoderDeps, str]) -> None:
     @agent.tool
-    async def openapi_export(ctx: "RunContext[CoderDeps]") -> CommandResult:
+    async def openapi_export(ctx: RunContext[CoderDeps]) -> CommandResult:
         """Export the backend OpenAPI schema to `openapi.json`.
 
         Call this after changing routes or Pydantic response models so
@@ -158,7 +158,7 @@ def register(agent: "Agent[CoderDeps, str]") -> None:
         return await _openapi_export(ctx.deps)
 
     @agent.tool
-    async def regenerate_client(ctx: "RunContext[CoderDeps]") -> CommandResult:
+    async def regenerate_client(ctx: RunContext[CoderDeps]) -> CommandResult:
         """Regenerate the TS client + TanStack Query hooks from `openapi.json`.
 
         Run `openapi_export` first if the schema has changed.
@@ -168,7 +168,7 @@ def register(agent: "Agent[CoderDeps, str]") -> None:
 
     @agent.tool
     async def alembic_autogenerate(
-        ctx: "RunContext[CoderDeps]",
+        ctx: RunContext[CoderDeps],
         message: str,
     ) -> AlembicResult:
         """Generate a new Alembic migration from the current ORM state.

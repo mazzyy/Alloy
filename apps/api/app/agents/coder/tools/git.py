@@ -38,10 +38,10 @@ async def _count_changed(workspace_root: Path) -> int:
     return sum(1 for line in res.stdout.splitlines() if line.strip())
 
 
-def register(agent: "Agent[CoderDeps, str]") -> None:
+def register(agent: Agent[CoderDeps, str]) -> None:
     @agent.tool
     async def git_commit(
-        ctx: "RunContext[CoderDeps]",
+        ctx: RunContext[CoderDeps],
         message: str,
         allow_empty: bool = False,
     ) -> GitCommitResult:

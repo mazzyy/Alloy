@@ -114,8 +114,8 @@ def _parse_patch(patch_text: str) -> list[_Hunk]:
         after: list[str] = []
         i += 1
         while i < len(lines):
-            l = lines[i]
-            if not l:
+            line = lines[i]
+            if not line:
                 # Blank line inside a hunk is a context-of-blank; diff
                 # format represents it as " " (single space) but LLMs
                 # sometimes drop the leading space. Treat empty as
@@ -124,7 +124,7 @@ def _parse_patch(patch_text: str) -> list[_Hunk]:
                 after.append("")
                 i += 1
                 continue
-            marker, rest = l[0], l[1:]
+            marker, rest = line[0], line[1:]
             if marker == " ":
                 before.append(rest)
                 after.append(rest)
@@ -322,12 +322,12 @@ def _apply_patch(root: Path, rel: str, patch_text: str) -> PatchResult:
     )
 
 
-def register(agent: "Agent[CoderDeps, str]") -> None:
+def register(agent: Agent[CoderDeps, str]) -> None:
     """Attach `apply_patch` to `agent`."""
 
     @agent.tool
     async def apply_patch(
-        ctx: "RunContext[CoderDeps]",
+        ctx: RunContext[CoderDeps],
         path: str,
         patch: str,
     ) -> PatchResult:
