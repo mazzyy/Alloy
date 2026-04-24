@@ -23,6 +23,7 @@ export default function App() {
       <Route path="/sign-in/*" element={<SignIn />} />
       <Route path="/" element={guard(<Dashboard />)} />
       <Route path="/build" element={guard(<Build />)} />
+      <Route path="/build/:projectId" element={guard(<Build />)} />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   );
