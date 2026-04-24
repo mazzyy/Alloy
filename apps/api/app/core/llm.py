@@ -114,6 +114,14 @@ class ModelCallOptions:
 
         Returns only fields that are set so we don't override provider
         defaults with `None`s (LiteLLM forwards every kwarg verbatim).
+
+        `verbosity` is deliberately *not* emitted here. The roadmap §5
+        lists it as a Responses-API field Chat Completions silently
+        ignores; Azure actually returns `400 Unknown parameter: 'text'`
+        when we send `extra_body={"text": {"verbosity": ...}}`. Until we
+        wire a Responses-API path through the router (LiteLLM's Azure
+        support still routes through Chat Completions), `verbosity`
+        rides along on the `ModelCallOptions` struct as metadata only.
         """
         kwargs: dict[str, Any] = {"max_tokens": self.max_tokens}
         if self.reasoning_effort:
@@ -123,8 +131,6 @@ class ModelCallOptions:
         if self.user:
             kwargs["user"] = self.user
         extra_body: dict[str, Any] = {}
-        if self.verbosity:
-            extra_body["text"] = {"verbosity": self.verbosity}
         if self.prompt_cache_key:
             extra_body["prompt_cache_key"] = self.prompt_cache_key
         if extra_body:
@@ -348,7 +354,10 @@ class RouterStats:
                     "calls": s.calls,
                     "errors": s.errors,
                     "avg_latency_s": (round(s.latency_sum_s / s.calls, 3) if s.calls else None),
-                    "cost_usd": round(s.cost_sum_usd, 4),
+                    # 6 decimals = micro-dollar precision; per-call costs on
+                    # cheap models (gpt-5-mini spec extraction ≈ $0.0003) lose
+                    # real signal at 4 decimals when aggregating over time.
+                    "cost_usd": round(s.cost_sum_usd, 6),
                     "tokens_in": s.tokens_in,
                     "tokens_out": s.tokens_out,
                     "last_error": s.last_error,

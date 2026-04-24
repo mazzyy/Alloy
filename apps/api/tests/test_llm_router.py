@@ -181,8 +181,11 @@ def test_model_call_options_defaults_flatten_cleanly() -> None:
     kwargs = opts.as_call_kwargs()
     assert kwargs["max_tokens"] == 4000
     assert kwargs["reasoning_effort"] == "low"
-    # Verbosity is nested under extra_body.text so Azure forwards it correctly.
-    assert kwargs["extra_body"] == {"text": {"verbosity": "low"}}
+    # Verbosity is intentionally NOT forwarded — `text.verbosity` is a
+    # Responses-API-only field and Azure Chat Completions rejects it with
+    # `400 Unknown parameter: 'text'`. With no prompt_cache_key and no
+    # verbosity, there's nothing to put in extra_body, so it must be absent.
+    assert "extra_body" not in kwargs
     # Absent fields (temperature, user, cache key) should NOT appear —
     # leaving them out preserves provider defaults.
     assert "temperature" not in kwargs
@@ -203,10 +206,9 @@ def test_model_call_options_full_payload() -> None:
     assert kwargs["max_tokens"] == 8000
     assert kwargs["temperature"] == 0.2
     assert kwargs["user"] == "user_abc"
-    assert kwargs["extra_body"] == {
-        "text": {"verbosity": "high"},
-        "prompt_cache_key": "tenant:t1:coder:v1",
-    }
+    # Only `prompt_cache_key` lands in extra_body; verbosity is dropped
+    # on the Chat Completions path (see docstring on `as_call_kwargs`).
+    assert kwargs["extra_body"] == {"prompt_cache_key": "tenant:t1:coder:v1"}
 
 
 # ── acompletion + stats ──────────────────────────────────────────────────

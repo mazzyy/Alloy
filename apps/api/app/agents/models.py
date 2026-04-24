@@ -62,22 +62,25 @@ def get_planner_model() -> OpenAIChatModel:
 def default_settings(
     *,
     reasoning_effort: str = "low",
-    verbosity: str = "low",
+    verbosity: str = "low",  # noqa: ARG001 — kept for call-site compatibility; see note below
     max_output_tokens: int = 4000,
 ) -> ModelSettings:
     """Shared defaults for every agent call.
 
-    Start at `reasoning_effort=low` / `verbosity=low` (roadmap §5 — avoid
-    burning reasoning tokens on simple spec extraction); individual agents
-    can bump these per-call via `agent.run(..., model_settings=...)`.
+    Start at `reasoning_effort=low` (roadmap §5 — avoid burning reasoning
+    tokens on simple spec extraction); individual agents can bump this
+    per-call via `agent.run(..., model_settings=...)`.
 
-    `verbosity` isn't a first-class key in pydantic-ai's `OpenAIChatModelSettings`
-    so we pass it through `extra_body` — Azure Chat Completions forwards it as
-    `text.verbosity` in the request payload. When the underlying deployment
-    doesn't support it (pre-gpt-5) Azure silently ignores.
+    We *do not* forward `verbosity` here. The roadmap claims Azure Chat
+    Completions silently ignores unknown params, but in practice it
+    rejects the request with `400 Unknown parameter: 'text'` when we
+    send `extra_body={"text": {"verbosity": ...}}`. `text.verbosity` is a
+    Responses-API-only field — use `get_openai_client()` + the Responses
+    endpoint when verbosity actually needs to land. Pydantic AI's
+    AzureProvider is Chat-Completions-only, so the parameter is kept in
+    the signature for call-site compatibility but otherwise ignored.
     """
     return OpenAIChatModelSettings(
         openai_reasoning_effort=reasoning_effort,  # type: ignore[typeddict-item]
         max_tokens=max_output_tokens,
-        extra_body={"text": {"verbosity": verbosity}},
     )
