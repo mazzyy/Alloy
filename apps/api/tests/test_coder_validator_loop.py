@@ -108,6 +108,22 @@ def workspace(tmp_path: Path) -> Path:
     return tmp_path
 
 
+def _mark_written(deps: CoderDeps, path: str = "apps/api/app/models/user.py") -> None:
+    """Simulate the agent having written a file during its turn.
+
+    `_scripted_agent`'s FunctionModel never actually calls tools — its
+    turns are pure text output — so `deps.touched_paths` stays empty
+    unless the test seeds it. The validator loop short-circuits when
+    `touched_paths` is empty (nothing was written → nothing for
+    code-quality validators to check), which is the right production
+    behavior but would cause every text-scripted test to skip the
+    validator stage. Tests that want to exercise the validator-running
+    path call this once before invoking the loop so the loop sees a
+    realistic post-tool state.
+    """
+    deps.touched_paths.add(path)
+
+
 # ── The loop's happy path and failure path ────────────────────────────
 
 
@@ -128,6 +144,7 @@ async def test_first_attempt_green_returns_ok_with_one_attempt(
 
     agent = _scripted_agent(["Wrote the User model."])
     deps = CoderDeps(workspace_root=workspace, turn_id="t", project_id="p")
+    _mark_written(deps)
 
     result = await loop_mod.run_task_with_validators(
         "Add a User model",
@@ -165,6 +182,7 @@ async def test_fails_then_succeeds_returns_ok_with_two_attempts(
 
     agent = _scripted_agent(["first attempt", "second attempt"])
     deps = CoderDeps(workspace_root=workspace)
+    _mark_written(deps)
 
     result = await loop_mod.run_task_with_validators(
         "Add a User model",
@@ -201,6 +219,7 @@ async def test_always_failing_validators_exhaust_attempts(
 
     agent = _scripted_agent(["try one", "try two", "try three"])
     deps = CoderDeps(workspace_root=workspace)
+    _mark_written(deps)
 
     result = await loop_mod.run_task_with_validators(
         "Impossible task",
@@ -257,6 +276,10 @@ async def test_agent_error_on_first_attempt_is_recorded_and_retried(
     )
     register_tools(agent)
     deps = CoderDeps(workspace_root=workspace)
+    # Attempt 2 succeeds with a text-only turn; seed touched_paths so the
+    # loop runs validators on the recovery attempt instead of taking its
+    # new "nothing touched → skip validators" short-circuit.
+    _mark_written(deps)
 
     result = await loop_mod.run_task_with_validators(
         "task",
