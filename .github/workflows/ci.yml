@@ -74,6 +74,13 @@ jobs:
           POSTGRES_DB: alloy
           REDIS_URL: redis://localhost:6379/0
         run: uv run pytest -xvs
+      - name: OpenAPI schema drift
+        # Fails the build if `apps/web/openapi.json` is out of sync with
+        # the current FastAPI routes. Regenerate locally with
+        # `uv run python -m scripts.export_openapi` + `pnpm generate-client`.
+        env:
+          ENVIRONMENT: local
+        run: uv run python -m scripts.export_openapi --check
 
   # ─── Frontend: typecheck + lint + vitest ───────────────────────────
   web:

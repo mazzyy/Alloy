@@ -261,8 +261,10 @@ async def test_middle_task_failure_skips_subsequent_tasks_and_rolls_back(
         first_line = task_prompt.splitlines()[0]
         call_log.append(first_line)
         # Agent writes + commits as part of the task — simulate with a
-        # real git commit so pre/post SHAs differ.
-        fname = first_line.split()[1]  # e.g. "Create apps/api/..."
+        # real git commit so pre/post SHAs differ. The prompt format is
+        # "Create <path>: <intent>", so token[1] carries a trailing colon
+        # we need to strip before using it as a filename.
+        fname = first_line.split()[1].rstrip(":")
         target = workspace / fname
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(f"# {first_line}\n", encoding="utf-8")
@@ -342,10 +344,14 @@ async def test_human_review_pauses_and_resume_completes_build(
         agent: Any = None,
     ) -> ValidatorLoopResult:
         attempts.append({"prompt": task_prompt})
-        # Task "a" asks for review on its FIRST call only. Tracking by
-        # call count makes the retry-after-resume path legible.
-        task_a_calls = sum(1 for a in attempts if "models/a.py" in a["prompt"])
-        if "models/a.py" in task_prompt and task_a_calls == 1:
+        # Realistic agent behaviour: task "a" keeps asking the same
+        # question every time the prompt doesn't contain the resolved
+        # answer. That matches how a real Coder Agent would behave,
+        # and it also matches LangGraph's re-execution model — the
+        # node is replayed from the top on resume, so task_node's
+        # inner `run_task_with_validators` call re-raises, the
+        # except-block runs, and `interrupt()` returns the answer.
+        if "models/a.py" in task_prompt and "Human review response" not in task_prompt:
             raise HumanReviewRequired(
                 question="Approve destructive rename?",
                 options=["yes", "no"],
@@ -383,9 +389,21 @@ async def test_human_review_pauses_and_resume_completes_build(
     assert resumed.pending_review is None
     # The retried task's prompt embeds the human answer — agents need
     # to know the question has been resolved.
+    #
+    # LangGraph's interrupt() re-executes the node from the top on
+    # resume, so we see three task-a calls:
+    #   1. pre-pause  — raises, except block calls interrupt() which
+    #      raises GraphInterrupt and pauses.
+    #   2. post-resume, first call inside the re-executed node — raises
+    #      again (real agents don't know the question has been answered
+    #      yet), except fires, interrupt() returns the resume value.
+    #   3. post-resume, second call inside the except block — prompt
+    #      now carries "Human review response: yes", agent returns OK.
     retry_prompts = [a["prompt"] for a in attempts if "models/a.py" in a["prompt"]]
-    assert len(retry_prompts) == 2
-    assert "Human review response: yes" in retry_prompts[1]
+    assert len(retry_prompts) == 3
+    assert "Human review response" not in retry_prompts[0]
+    assert "Human review response" not in retry_prompts[1]
+    assert "Human review response: yes" in retry_prompts[2]
 
 
 # ── Sqlite checkpointer (persistence across process boundaries) ───────

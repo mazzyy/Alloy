@@ -39,7 +39,13 @@ dependencies = [
     # for the build-loop's "pause on human review, resume later" UX:
     # SqliteSaver persists state across process restarts so an in-flight
     # build can survive a worker redeploy.
-    "langgraph-checkpoint-sqlite>=2.0.0,<3.0.0",
+    #
+    # langgraph-checkpoint-sqlite 2.x calls `self.conn.is_alive()`, which
+    # relied on aiosqlite.Connection inheriting from Thread — an API
+    # aiosqlite dropped in 0.20+. 3.x switched to a version-agnostic
+    # `_ensure_connected()` helper, so we pin >=3.0 to stay compatible
+    # with the currently-released aiosqlite line.
+    "langgraph-checkpoint-sqlite>=3.0.0,<4.0.0",
     "aiosqlite>=0.20.0,<1.0.0",
 
     # Scaffolder (Copier wraps Jinja + renders the base template)

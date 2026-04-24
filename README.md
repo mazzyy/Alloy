@@ -1,6 +1,6 @@
 # Alloy
 
-> **The Python-first AI code generator.** Every dominant AI code-generator today (Bolt, v0, Lovable, Cursor Composer, Replit Agent) is Node/Next/Supabase-centric because in-browser WASM runtimes can't run FastAPI. A Python-first generator with per-project cloud sandboxes and a fine-tuned apply model is a genuine market gap.
+> **The Python-first AI code generator.** Every dominant AI code generator today (Bolt, v0, Lovable, Cursor Composer, Replit Agent) is Node/Next/Supabase centric because in browser WASM runtimes can't run FastAPI. A Python-first generator with per-project cloud sandboxes and a fine-tuned apply model is a genuine market gap.
 
 ---
 
