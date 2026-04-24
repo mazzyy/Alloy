@@ -35,6 +35,12 @@ dependencies = [
     # Slim variant pulls only what we need (OpenAI provider); keeps image small.
     "pydantic-ai-slim[openai]>=1.0.0,<2.0.0",
     "langgraph>=1.0.0,<2.0.0",
+    # Checkpointer lives in a separate package in langgraph 1.x. Needed
+    # for the build-loop's "pause on human review, resume later" UX:
+    # SqliteSaver persists state across process restarts so an in-flight
+    # build can survive a worker redeploy.
+    "langgraph-checkpoint-sqlite>=2.0.0,<3.0.0",
+    "aiosqlite>=0.20.0,<1.0.0",
 
     # Scaffolder (Copier wraps Jinja + renders the base template)
     "copier>=9.4.0,<10.0.0",
