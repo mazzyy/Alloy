@@ -49,6 +49,12 @@ _ISSUE_CAP = 50
 
 # Shorthand → list of (binary, args). We build this as a mapping so the
 # agent sees a consistent menu in the tool docstring.
+#
+# Each arg list is the *default* invocation when no scope is known. When
+# the validator loop has a set of touched paths, we swap the trailing
+# "default scope" token (e.g. `"."` for ruff/eslint, `"app"` for mypy,
+# nothing for pytest/tsc/vitest) for the relevant subset of touched
+# paths. See `_scope_args_for` below for the per-binary rules.
 TARGETS: dict[str, list[tuple[str, list[str]]]] = {
     "python": [
         ("ruff", ["check", "--output-format", "concise", "."]),
@@ -65,6 +71,75 @@ TARGETS: dict[str, list[tuple[str, list[str]]]] = {
         ("vitest", ["run", "--reporter=json"]),
     ],
 }
+
+
+# Extension → which binaries care about this file type. Used to split
+# the touched-paths set per binary so we don't feed `.ts` files to ruff.
+_EXT_OWNERS: dict[str, frozenset[str]] = {
+    ".py": frozenset({"ruff", "mypy"}),
+    ".pyi": frozenset({"ruff", "mypy"}),
+    ".ts": frozenset({"tsc", "eslint"}),
+    ".tsx": frozenset({"tsc", "eslint"}),
+    ".js": frozenset({"eslint"}),
+    ".jsx": frozenset({"eslint"}),
+    ".mjs": frozenset({"eslint"}),
+    ".cjs": frozenset({"eslint"}),
+}
+
+
+def _paths_for_binary(binary: str, touched: list[str]) -> list[str]:
+    """Return the subset of `touched` that `binary` should lint/type-check.
+
+    Empty result means "no work for this binary this turn" — the caller
+    can skip it entirely. This is the main mechanism that stops ruff
+    from sweeping up pre-existing lint debt in unrelated files.
+    """
+    out: list[str] = []
+    for p in touched:
+        ext = ""
+        dot = p.rfind(".")
+        if dot >= 0:
+            ext = p[dot:].lower()
+        owners = _EXT_OWNERS.get(ext, frozenset())
+        if binary in owners:
+            out.append(p)
+    return out
+
+
+def _scope_args_for(binary: str, base_args: list[str], paths: list[str]) -> list[str]:
+    """Rewrite `base_args` so `binary` runs against `paths` only.
+
+    Rules per binary:
+    * ruff: trailing `.` → the paths.
+    * mypy: trailing positional dir (`app`) → the paths.
+    * eslint: trailing `.` → the paths.
+    * tsc: `--noEmit` alone has no scope semantics (tsc always walks the
+      tsconfig project). Best we can do is leave it; an alternative is
+      `--project tsconfig.json` but that's still whole-project.
+    * pytest/vitest: test discovery is project-wide by design. Scoping
+      would require mapping source → test, which we don't do yet.
+    """
+    if not paths:
+        return list(base_args)
+    if binary == "ruff":
+        # Replace trailing "." with the path list.
+        if base_args and base_args[-1] == ".":
+            return [*base_args[:-1], *paths]
+        return [*base_args, *paths]
+    if binary == "mypy":
+        # Replace a trailing positional dir (our default is "app") with
+        # the touched Python paths. If the base already has flags only
+        # (no positional), append the paths.
+        if base_args and not base_args[-1].startswith("-"):
+            return [*base_args[:-1], *paths]
+        return [*base_args, *paths]
+    if binary == "eslint":
+        if base_args and base_args[-1] == ".":
+            return [*base_args[:-1], *paths]
+        return [*base_args, *paths]
+    # tsc / pytest / vitest — leave alone; they don't support per-file
+    # scoping in the way we'd want here.
+    return list(base_args)
 
 
 # ── Parsers ────────────────────────────────────────────────────────────
@@ -229,12 +304,22 @@ def _parse_for(binary: str, cmd: CommandResult) -> list[ValidatorIssue]:
 async def run_validators(
     deps: "CoderDeps",
     targets: list[str] | None = None,
+    *,
+    paths: list[str] | None = None,
 ) -> ValidatorReport:
     """Run validators for each named target sequentially and collect issues.
 
     Sequentially, not in parallel (yet) — LiteLLM routing + sandbox
     contention make parallel stderr interleaving unreadable for now.
     The issue count is a stronger signal than wall-clock for this tool.
+
+    If `paths` is provided, scope-capable binaries (ruff, mypy, eslint)
+    only check that subset, filtered further by file extension (`.py`
+    for ruff/mypy, `.ts`/`.tsx` etc. for eslint). When the subset is
+    empty for a binary, we skip that binary entirely. Binaries that
+    don't support per-file scoping (tsc/pytest/vitest) still run in
+    their project-wide default mode — scoping those safely requires
+    source→test mapping we haven't built yet.
     """
     selected = targets or ["python"]
     for t in selected:
@@ -247,7 +332,18 @@ async def run_validators(
     issues: list[ValidatorIssue] = []
     overall_ok = True
     for target in selected:
-        for binary, args in TARGETS[target]:
+        for binary, base_args in TARGETS[target]:
+            if paths is not None:
+                scoped_paths = _paths_for_binary(binary, paths)
+                # If the user touched no files of this binary's type this
+                # turn, there's nothing for it to check — skip. This is
+                # the fix for the "lint-chasing across the whole repo"
+                # failure mode.
+                if binary in {"ruff", "mypy", "eslint"} and not scoped_paths:
+                    continue
+                args = _scope_args_for(binary, base_args, scoped_paths)
+            else:
+                args = list(base_args)
             result = await run_command(deps, binary, args, timeout_s=120)
             commands.append(result)
             if result.returncode != 0:

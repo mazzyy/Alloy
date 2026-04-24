@@ -285,6 +285,8 @@ def _apply_patch_to_text(text: str, patch_text: str) -> tuple[str, list[PatchHun
 
 
 def _apply_patch(root: Path, rel: str, patch_text: str) -> PatchResult:
+    if not rel or not rel.strip():
+        raise ToolInputError("path must not be empty")
     path = resolve_inside(root, rel)
     if not path.exists():
         raise ToolInputError(
@@ -343,7 +345,11 @@ def register(agent: "Agent[CoderDeps, str]") -> None:
         """
         ctx.deps.bind(tool="apply_patch", path=path, patch_bytes=len(patch)).debug("coder.tool")
         try:
-            return _apply_patch(ctx.deps.workspace_root, path, patch)
+            result = _apply_patch(ctx.deps.workspace_root, path, patch)
+            # Record the edit so the validator loop can scope lint/type
+            # checks to files actually touched this turn.
+            ctx.deps.touched_paths.add(result.path)
+            return result
         except PatchApplyError as exc:
             # Translate into pydantic-ai's retry-hint exception so the
             # model sees the diagnostics as a tool-return, not as an

@@ -131,6 +131,17 @@ def test_write_file_refuses_overwrite(workspace: Path) -> None:
         _write_file(workspace, "apps/api/app/main.py", "# rewritten\n")
 
 
+def test_write_file_rejects_empty_path(workspace: Path) -> None:
+    """Regression: the model sometimes emits `path=""` when its
+    argument extraction slips. Used to fall into `resolve_inside` with
+    a confusing error; we now reject early with a clear ToolInputError
+    so the retry hint is obvious."""
+    with pytest.raises(ToolInputError, match="path must not be empty"):
+        _write_file(workspace, "", "x = 1\n")
+    with pytest.raises(ToolInputError, match="path must not be empty"):
+        _write_file(workspace, "   ", "x = 1\n")
+
+
 def test_write_file_blocks_workspace_escape(workspace: Path) -> None:
     with pytest.raises(WorkspaceEscapeError):
         _write_file(workspace, "../escape.py", "pwned\n")

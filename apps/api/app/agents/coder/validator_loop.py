@@ -247,7 +247,17 @@ async def run_task_with_validators(
             continue
 
         # --- 2. Run validators ---
-        report = await run_validators(deps, list(targets))
+        # Scope to files the agent touched this run, so pre-existing
+        # lint/type debt in unrelated files doesn't masquerade as "this
+        # attempt's failures" and derail the model into lint-chasing.
+        # `None` (whole-repo) only when the agent hasn't written
+        # anything — which usually means it just read and the "task"
+        # was already satisfied; in that case we still want a repo-wide
+        # sanity check so we don't declare green on a silent no-op.
+        scope_paths: list[str] | None = None
+        if deps.touched_paths:
+            scope_paths = sorted(deps.touched_paths)
+        report = await run_validators(deps, list(targets), paths=scope_paths)
         attempts.append(
             ValidatorLoopAttempt(
                 attempt=attempt_idx,

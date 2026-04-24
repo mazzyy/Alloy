@@ -177,6 +177,8 @@ def _read_file(
 
 
 def _write_file(root: Path, rel: str, content: str) -> WriteResult:
+    if not rel or not rel.strip():
+        raise ToolInputError("path must not be empty")
     path = resolve_inside(root, rel)
     if path.exists():
         # Explicit: write_file is create-only. Edits must go through
@@ -237,4 +239,8 @@ def register(agent: "Agent[CoderDeps, str]") -> None:
         Creates parent directories as needed.
         """
         ctx.deps.bind(tool="write_file", path=path, bytes=len(content)).debug("coder.tool")
-        return _write_file(ctx.deps.workspace_root, path, content)
+        result = _write_file(ctx.deps.workspace_root, path, content)
+        # Record the write so the validator loop can scope lint/type
+        # checks to files we actually touched this turn.
+        ctx.deps.touched_paths.add(result.path)
+        return result

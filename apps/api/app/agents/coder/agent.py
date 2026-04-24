@@ -49,7 +49,18 @@ def build_coder_agent() -> Agent[CoderDeps, str]:
         # us under the 128K output cap while leaving headroom for
         # reasoning tokens.
         model_settings=default_settings(reasoning_effort="low", max_output_tokens=8000),
-        retries=1,
+        # `retries=3` is pydantic-ai's per-tool retry budget (separate
+        # from our validator-loop retry budget). We bumped from 1 → 3
+        # after an Azure run where the model emitted a malformed
+        # apply_patch call, got the ModelRetry hint, emitted *another*
+        # malformed call with path="" (different bug, also retry-able),
+        # and then pydantic-ai gave up with UnexpectedModelBehavior —
+        # consuming an entire validator-loop attempt. Three per-turn
+        # retries is enough for the model to try a write_file fallback,
+        # re-read the file, or correct path-arg mistakes before we bail
+        # the whole attempt. Still small enough that a truly stuck agent
+        # (wrong mental model of a file) surfaces quickly.
+        retries=3,
         name="alloy.coder_agent",
     )
     register_tools(agent)

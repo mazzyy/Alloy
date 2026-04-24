@@ -139,6 +139,18 @@ def test_apply_patch_refuses_nonexistent_file(tmp_path: Path) -> None:
         _apply_patch(tmp_path, "no_such_file.py", "@@ -1,1 +1,1 @@\n-x\n+y\n")
 
 
+def test_apply_patch_rejects_empty_path(tmp_path: Path) -> None:
+    """Regression: the model emitted `apply_patch(path="", patch=...)`
+    in an Azure run, which previously fell through to `resolve_inside`
+    and surfaced a confusing error. Now rejected early with a clear
+    ToolInputError; the tool-handler translates it to ModelRetry so the
+    same turn can correct the path."""
+    with pytest.raises(ToolInputError, match="path must not be empty"):
+        _apply_patch(tmp_path, "", "@@ -1,1 +1,1 @@\n-x\n+y\n")
+    with pytest.raises(ToolInputError, match="path must not be empty"):
+        _apply_patch(tmp_path, "   ", "@@ -1,1 +1,1 @@\n-x\n+y\n")
+
+
 # ── Agent-level tool handler (`apply_patch` registered on an Agent) ────
 #
 # These tests guard a real regression we hit: the model emitted a patch

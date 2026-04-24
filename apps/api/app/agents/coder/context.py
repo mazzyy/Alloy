@@ -43,6 +43,14 @@ class CoderDeps:
     project_id: str | None = None
     # How many tool failures this task has left before we bail.
     retry_budget: int = 3
+    # Workspace-relative paths the agent has mutated this run (via
+    # `write_file`, `apply_patch`, or equivalent). The validator loop
+    # reads this to scope ruff/mypy to files actually touched this
+    # turn — otherwise pre-existing lint debt in unrelated files shows
+    # up as "failures of this attempt" and the agent goes lint-chasing
+    # across the whole repo. Observed against a real Azure run where
+    # 50 unrelated ruff issues masked a clean User-model addition.
+    touched_paths: set[str] = field(default_factory=set)
     # structlog's `get_logger` returns a BoundLoggerLazyProxy that
     # proxies every method onto a real BoundLogger on first use, so
     # this is `Any`-typed to sidestep mypy's strict view of the proxy.

@@ -199,3 +199,117 @@ async def test_run_validators_reports_issues_on_failure(
 async def test_run_validators_rejects_unknown_target(workspace: Path) -> None:
     with pytest.raises(Exception, match="unknown validator target"):
         await run_validators(_deps(workspace), targets=["not-a-target"])
+
+
+# ── Scoping by touched paths ───────────────────────────────────────────
+#
+# Regression for an Azure run in which the Coder Agent added a clean
+# User model but ruff reported 50 pre-existing lint issues in unrelated
+# files (alembic/env.py, coder/tools/codegen.py, …), masking the clean
+# addition and derailing the agent into lint-chasing across the repo.
+# After the fix, `run_validators(paths=[...])` must:
+#   (a) pass those paths as ruff/mypy positional args;
+#   (b) drop the binary's default whole-repo token (`.` for ruff,
+#       `app` for mypy);
+#   (c) split by extension so a `.ts` file never reaches ruff; and
+#   (d) skip ruff/mypy entirely when no Python files were touched.
+
+
+async def test_run_validators_scopes_ruff_and_mypy_to_touched_py_files(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    invocations: list[tuple[str, list[str]]] = []
+
+    async def recording_runner(
+        _deps: CoderDeps, binary: str, args: list[str], *, timeout_s: int = 60
+    ) -> CommandResult:
+        invocations.append((binary, list(args)))
+        return CommandResult(
+            command=f"{binary} {' '.join(args)}",
+            returncode=0,
+            stdout="",
+            stderr="",
+            duration_s=0.0,
+        )
+
+    monkeypatch.setattr(validators_mod, "run_command", recording_runner)
+
+    report = await run_validators(
+        _deps(workspace),
+        targets=["python"],
+        paths=["apps/api/app/models/user.py", "apps/api/app/models/__init__.py"],
+    )
+
+    assert report.ok is True
+    # ruff invocation: default ended in `.`; that should be replaced.
+    ruff_args = next(args for b, args in invocations if b == "ruff")
+    assert "." not in ruff_args
+    assert "apps/api/app/models/user.py" in ruff_args
+    assert "apps/api/app/models/__init__.py" in ruff_args
+    # mypy invocation: default ended in `app`; that should be replaced.
+    mypy_args = next(args for b, args in invocations if b == "mypy")
+    assert "app" not in mypy_args
+    assert "apps/api/app/models/user.py" in mypy_args
+
+
+async def test_run_validators_skips_ruff_when_no_py_files_touched(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Touching only frontend files should keep ruff silent — it's the
+    mechanism that prevents the whole-repo lint sweep on every attempt."""
+    invocations: list[str] = []
+
+    async def recording_runner(
+        _deps: CoderDeps, binary: str, args: list[str], *, timeout_s: int = 60
+    ) -> CommandResult:
+        invocations.append(binary)
+        return CommandResult(
+            command=f"{binary} {' '.join(args)}",
+            returncode=0,
+            stdout="",
+            stderr="",
+            duration_s=0.0,
+        )
+
+    monkeypatch.setattr(validators_mod, "run_command", recording_runner)
+
+    report = await run_validators(
+        _deps(workspace),
+        targets=["python"],
+        paths=["apps/web/src/App.tsx"],
+    )
+
+    assert report.ok is True
+    # No Python files touched → ruff and mypy both skipped.
+    assert invocations == []
+
+
+async def test_run_validators_whole_repo_when_paths_is_none(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Back-compat: passing `paths=None` keeps the old whole-repo mode
+    so callers (and our own test suite) can still drive validators
+    without a touched-set."""
+    invocations: list[tuple[str, list[str]]] = []
+
+    async def recording_runner(
+        _deps: CoderDeps, binary: str, args: list[str], *, timeout_s: int = 60
+    ) -> CommandResult:
+        invocations.append((binary, list(args)))
+        return CommandResult(
+            command=f"{binary} {' '.join(args)}",
+            returncode=0,
+            stdout="",
+            stderr="",
+            duration_s=0.0,
+        )
+
+    monkeypatch.setattr(validators_mod, "run_command", recording_runner)
+
+    await run_validators(_deps(workspace), targets=["python"])
+    binaries = [b for b, _ in invocations]
+    assert binaries == ["ruff", "mypy"]
+    # ruff still gets the default whole-repo marker.
+    assert invocations[0][1][-1] == "."
+    # mypy still gets the default "app" positional.
+    assert invocations[1][1][-1] == "app"

@@ -116,7 +116,12 @@ async def test_first_attempt_green_returns_ok_with_one_attempt(
 ) -> None:
     """If validators pass on attempt 1, we don't run a second attempt."""
 
-    async def fake_validators(deps: CoderDeps, targets: list[str]) -> ValidatorReport:
+    async def fake_validators(
+        deps: CoderDeps,
+        targets: list[str],
+        *,
+        paths: list[str] | None = None,
+    ) -> ValidatorReport:
         return _make_report(ok=True)
 
     monkeypatch.setattr(loop_mod, "run_validators", fake_validators)
@@ -148,7 +153,12 @@ async def test_fails_then_succeeds_returns_ok_with_two_attempts(
     """Attempt 1 fails, attempt 2 passes — loop stops at attempt 2."""
     reports = iter([_make_report(ok=False, issues=2), _make_report(ok=True)])
 
-    async def fake_validators(deps: CoderDeps, targets: list[str]) -> ValidatorReport:
+    async def fake_validators(
+        deps: CoderDeps,
+        targets: list[str],
+        *,
+        paths: list[str] | None = None,
+    ) -> ValidatorReport:
         return next(reports)
 
     monkeypatch.setattr(loop_mod, "run_validators", fake_validators)
@@ -179,7 +189,12 @@ async def test_always_failing_validators_exhaust_attempts(
     and return ok=False with every attempt's report preserved.
     """
 
-    async def fake_validators(deps: CoderDeps, targets: list[str]) -> ValidatorReport:
+    async def fake_validators(
+        deps: CoderDeps,
+        targets: list[str],
+        *,
+        paths: list[str] | None = None,
+    ) -> ValidatorReport:
         return _make_report(ok=False, issues=3)
 
     monkeypatch.setattr(loop_mod, "run_validators", fake_validators)
@@ -213,7 +228,12 @@ async def test_agent_error_on_first_attempt_is_recorded_and_retried(
 
     calls = [0]
 
-    async def fake_validators(deps: CoderDeps, targets: list[str]) -> ValidatorReport:
+    async def fake_validators(
+        deps: CoderDeps,
+        targets: list[str],
+        *,
+        paths: list[str] | None = None,
+    ) -> ValidatorReport:
         calls[0] += 1
         return _make_report(ok=True)
 
@@ -264,7 +284,12 @@ async def test_human_review_required_propagates(
     LangGraph outer loop can pause the build — we never want to burn
     retries on a question the agent explicitly flagged."""
 
-    async def fake_validators(deps: CoderDeps, targets: list[str]) -> ValidatorReport:
+    async def fake_validators(
+        deps: CoderDeps,
+        targets: list[str],
+        *,
+        paths: list[str] | None = None,
+    ) -> ValidatorReport:
         return _make_report(ok=True)
 
     monkeypatch.setattr(loop_mod, "run_validators", fake_validators)
@@ -296,7 +321,12 @@ async def test_human_review_required_propagates(
 async def test_max_attempts_must_be_at_least_one(
     workspace: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    async def fake_validators(deps: CoderDeps, targets: list[str]) -> ValidatorReport:
+    async def fake_validators(
+        deps: CoderDeps,
+        targets: list[str],
+        *,
+        paths: list[str] | None = None,
+    ) -> ValidatorReport:
         return _make_report(ok=True)
 
     monkeypatch.setattr(loop_mod, "run_validators", fake_validators)
@@ -357,3 +387,81 @@ def test_build_retry_prompt_truncates_long_issue_list() -> None:
     report = _make_report(ok=False, issues=loop_mod._TOP_K_ISSUES + 5)
     prompt = loop_mod._build_retry_prompt(report, attempt=1, max_attempts=3)
     assert f"(+5 more issues omitted)" in prompt
+
+
+# ── Validator scoping propagation ──────────────────────────────────────
+
+
+async def test_loop_passes_touched_paths_to_validators(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: the loop must forward `deps.touched_paths` to
+    `run_validators(paths=...)`. Without this, pre-existing lint debt in
+    unrelated files re-surfaces every attempt and the model goes
+    lint-chasing. Observed against Azure, fixed by scoping validators
+    per touched-set."""
+
+    captured_paths: list[list[str] | None] = []
+
+    async def fake_validators(
+        deps: CoderDeps,
+        targets: list[str],
+        *,
+        paths: list[str] | None = None,
+    ) -> ValidatorReport:
+        captured_paths.append(paths)
+        return _make_report(ok=True)
+
+    monkeypatch.setattr(loop_mod, "run_validators", fake_validators)
+
+    agent = _scripted_agent(["added User model"])
+    deps = CoderDeps(workspace_root=workspace)
+    # Pretend the agent's tools recorded two writes during the run. The
+    # loop reads this set *after* the agent runs, so seeding it
+    # up-front simulates the post-tool state.
+    deps.touched_paths.update(
+        {"apps/api/app/models/user.py", "apps/api/app/models/__init__.py"}
+    )
+
+    result = await loop_mod.run_task_with_validators(
+        "Add a User model",
+        deps,
+        max_attempts=1,
+        agent=agent,
+    )
+
+    assert result.ok is True
+    assert captured_paths == [
+        sorted({"apps/api/app/models/user.py", "apps/api/app/models/__init__.py"})
+    ]
+
+
+async def test_loop_passes_none_paths_when_nothing_touched(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If the agent made no writes, we still want a repo-wide sanity
+    pass — so `paths` stays `None` and validators run whole-repo. This
+    catches the case where the agent decides the task is already done
+    and only reads; we don't want a silent no-op masquerading as
+    success."""
+
+    captured: list[list[str] | None] = []
+
+    async def fake_validators(
+        deps: CoderDeps,
+        targets: list[str],
+        *,
+        paths: list[str] | None = None,
+    ) -> ValidatorReport:
+        captured.append(paths)
+        return _make_report(ok=True)
+
+    monkeypatch.setattr(loop_mod, "run_validators", fake_validators)
+
+    agent = _scripted_agent(["nothing to do"])
+    deps = CoderDeps(workspace_root=workspace)
+
+    await loop_mod.run_task_with_validators(
+        "already done", deps, max_attempts=1, agent=agent
+    )
+    assert captured == [None]
