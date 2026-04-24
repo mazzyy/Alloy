@@ -436,16 +436,27 @@ async def test_loop_passes_touched_paths_to_validators(
     ]
 
 
-async def test_loop_passes_none_paths_when_nothing_touched(
+async def test_loop_skips_validators_entirely_when_nothing_touched(
     workspace: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """If the agent made no writes, we still want a repo-wide sanity
-    pass — so `paths` stays `None` and validators run whole-repo. This
-    catches the case where the agent decides the task is already done
-    and only reads; we don't want a silent no-op masquerading as
-    success."""
+    """If the agent made no writes, skip validators entirely and return a
+    clean empty report.
 
-    captured: list[list[str] | None] = []
+    Earlier behavior ran validators whole-repo in this case on the theory
+    that it "catches silent no-ops". That rationale turned out to be
+    wrong: ruff/mypy/pytest measure code quality, not spec compliance —
+    running them against the whole repo when the agent didn't write
+    anything is guaranteed to re-surface the exact pre-existing lint
+    debt we were trying to hide from the model in the first place.
+
+    Spec-compliance checks (did the agent actually do the thing?) belong
+    to the outer build loop (#24 LangGraph) or a dedicated assertion
+    step, not to this loop. Observed against Azure: a run where `user.py`
+    already existed, the agent read it, confirmed the fields, committed
+    empty, and then the loop triggered a whole-repo lint sweep that
+    turned up 50 unrelated issues and failed the task."""
+
+    called = False
 
     async def fake_validators(
         deps: CoderDeps,
@@ -453,7 +464,8 @@ async def test_loop_passes_none_paths_when_nothing_touched(
         *,
         paths: list[str] | None = None,
     ) -> ValidatorReport:
-        captured.append(paths)
+        nonlocal called
+        called = True
         return _make_report(ok=True)
 
     monkeypatch.setattr(loop_mod, "run_validators", fake_validators)
@@ -461,7 +473,13 @@ async def test_loop_passes_none_paths_when_nothing_touched(
     agent = _scripted_agent(["nothing to do"])
     deps = CoderDeps(workspace_root=workspace)
 
-    await loop_mod.run_task_with_validators(
+    result = await loop_mod.run_task_with_validators(
         "already done", deps, max_attempts=1, agent=agent
     )
-    assert captured == [None]
+    assert called is False, "run_validators must not be invoked when nothing was touched"
+    assert result.ok is True
+    assert result.attempts_used == 1
+    assert result.final_report is not None
+    assert result.final_report.ok is True
+    assert result.final_report.issue_count == 0
+    assert result.final_report.commands == []

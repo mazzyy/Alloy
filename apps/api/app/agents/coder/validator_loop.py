@@ -250,13 +250,45 @@ async def run_task_with_validators(
         # Scope to files the agent touched this run, so pre-existing
         # lint/type debt in unrelated files doesn't masquerade as "this
         # attempt's failures" and derail the model into lint-chasing.
-        # `None` (whole-repo) only when the agent hasn't written
-        # anything — which usually means it just read and the "task"
-        # was already satisfied; in that case we still want a repo-wide
-        # sanity check so we don't declare green on a silent no-op.
-        scope_paths: list[str] | None = None
-        if deps.touched_paths:
-            scope_paths = sorted(deps.touched_paths)
+        #
+        # If the agent wrote nothing, skip validators entirely and return
+        # a clean empty report. Rationale: ruff/mypy/pytest check *code
+        # quality*, not spec compliance — running them against the whole
+        # repo when nothing changed is guaranteed to re-surface the
+        # existing lint debt we were just trying to hide from the model,
+        # and "did the agent actually do anything?" is the outer build
+        # loop's responsibility (#24 LangGraph, or a dedicated spec-
+        # assertion step), not this loop's.
+        if not deps.touched_paths:
+            empty_report = ValidatorReport(
+                ok=True,
+                issue_count=0,
+                issues=[],
+                commands=[],
+            )
+            attempts.append(
+                ValidatorLoopAttempt(
+                    attempt=attempt_idx,
+                    agent_output=output,
+                    agent_turn_count=turn_count,
+                    report=empty_report,
+                    agent_error=None,
+                )
+            )
+            log.info(
+                "validator_loop.no_writes_skip_validators",
+                attempt=attempt_idx,
+                turn_count=turn_count,
+            )
+            return ValidatorLoopResult(
+                ok=True,
+                attempts_used=attempt_idx,
+                max_attempts=max_attempts,
+                attempts=attempts,
+                final_report=empty_report,
+            )
+
+        scope_paths = sorted(deps.touched_paths)
         report = await run_validators(deps, list(targets), paths=scope_paths)
         attempts.append(
             ValidatorLoopAttempt(
