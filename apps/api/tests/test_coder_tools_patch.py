@@ -242,3 +242,78 @@ async def test_apply_patch_handler_converts_hunkless_patch_to_model_retry(
     )
     # File must not have been mutated by the bad patch.
     assert target.read_text() == "a\nb\nc\n"
+
+
+# 8th-regression follow-up — when `apply_patch` fails on context mismatch
+# (not malformed input), the retry payload must include the actual file
+# contents inline so the agent has fresh anchors without needing to call
+# `read_file` first. Phase-1 traces showed the agent re-emitting the same
+# stale-context patch three times in a row, exhausting pydantic-ai's
+# per-tool retry budget and crashing the whole turn with
+# `UnexpectedModelBehavior`. Embedding the file slice in the ModelRetry
+# message eliminates that loop.
+
+
+@_pytest.mark.asyncio
+async def test_apply_patch_context_miss_embeds_file_excerpt(tmp_path: Path) -> None:
+    target = tmp_path / "models.py"
+    target.write_text(
+        "class User(SQLModel, table=True):\n"
+        "    id: int\n"
+        "    email: str\n",
+        encoding="utf-8",
+    )
+
+    seen_excerpt = {"value": False}
+
+    async def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        # Inspect every prior message for the embedded file contents.
+        for m in messages:
+            for p in getattr(m, "parts", []):
+                content = str(getattr(p, "content", "") or "")
+                # The retry payload must contain the literal file body.
+                if "Current file contents of models.py" in content and "class User" in content:
+                    seen_excerpt["value"] = True
+        # First turn: emit a patch whose context doesn't match (the file
+        # has `class User`, but the patch claims to find `class Order`).
+        if not seen_excerpt["value"]:
+            return ModelResponse(
+                parts=[
+                    ToolCallPart(
+                        tool_name="apply_patch",
+                        args={
+                            "path": "models.py",
+                            "patch": (
+                                "@@ -1,3 +1,4 @@\n"
+                                " class Order(SQLModel, table=True):\n"
+                                "     id: int\n"
+                                "+    total: float\n"
+                                "     email: str\n"
+                            ),
+                        },
+                        tool_call_id="call-1",
+                    )
+                ]
+            )
+        # Second turn: confirm we saw the excerpt; close out.
+        return ModelResponse(parts=[TextPart(content="saw file excerpt")])
+
+    agent = Agent[CoderDeps, str](
+        model=FunctionModel(respond),
+        deps_type=CoderDeps,
+        output_type=str,
+        system_prompt="t",
+        retries=2,
+    )
+    register_patch_tool(agent)
+    deps = CoderDeps(workspace_root=tmp_path)
+
+    result = await agent.run("edit models.py", deps=deps)
+
+    assert result.output == "saw file excerpt"
+    assert seen_excerpt["value"], (
+        "context-miss retry payload did not include the file contents "
+        "inline — agent will keep re-emitting stale-context patches"
+    )
+    # File must not have been mutated by the failed patch.
+    assert target.read_text().startswith("class User")

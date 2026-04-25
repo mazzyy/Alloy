@@ -58,7 +58,24 @@ _ISSUE_CAP = 50
 TARGETS: dict[str, list[tuple[str, list[str]]]] = {
     "python": [
         ("ruff", ["check", "--output-format", "concise", "."]),
-        ("mypy", ["--no-color-output", "--hide-error-context", "app"]),
+        # `--ignore-missing-imports` is belt-and-suspenders with the
+        # template's `[tool.mypy] ignore_missing_imports = true`. The
+        # generator installs blocks (auth/clerk, billing/stripe, ...)
+        # that pull in third-party deps without type stubs (pwdlib,
+        # argon2, bcrypt, stripe, ...). With strict mypy on the project
+        # side, every such import becomes a hard error that blocks the
+        # validator loop even though the runtime code is fine. Setting
+        # this flag at the validator layer keeps the agent unblocked
+        # even if a project's `pyproject.toml` ever loses the override.
+        (
+            "mypy",
+            [
+                "--no-color-output",
+                "--hide-error-context",
+                "--ignore-missing-imports",
+                "app",
+            ],
+        ),
     ],
     "python-tests": [
         ("pytest", ["-x", "--tb=short", "-q"]),
@@ -301,6 +318,59 @@ def _parse_for(binary: str, cmd: CommandResult) -> list[ValidatorIssue]:
 # ── Orchestration ─────────────────────────────────────────────────────
 
 
+# Ruff codes we trust ruff itself to auto-fix without semantic risk.
+# W291/W292/W293 — trailing/missing/blank-line whitespace (Mako template
+#                  artefact in alembic; pure formatting).
+# I001/I002      — import order / missing required imports (ruff's "I"
+#                  family is deterministic, repo-style-aware).
+# UP006/UP007    — typing modernisations (only fire on Python 3.9+ which
+#                  is our floor).
+# COM812         — trailing comma in collections (formatting).
+# E501           — line too long; ruff's `--fix` won't shorten it on its
+#                  own (we don't include it here), but `ruff format`
+#                  will reflow.
+# We deliberately exclude F401 (unused imports) — auto-removing those
+# can mask a half-finished edit where the import was added before the
+# code that uses it. Same reason F841 (unused local) is excluded.
+_PRE_VALIDATOR_AUTOFIX_SELECT = "W291,W292,W293,I001,I002,UP006,UP007,COM812"
+
+
+async def _pre_validator_autofix(
+    deps: CoderDeps,
+    paths: list[str] | None,
+) -> None:
+    """Run `ruff format` + `ruff check --fix` on touched Python paths.
+
+    This runs BEFORE any validator binary — the goal is to absorb the
+    class of failures that the agent literally cannot fix (Mako-template
+    trailing whitespace in alembic migrations) and the class it can but
+    shouldn't burn a retry attempt on (import-order I001 on edits to
+    scaffold files like `pwdlib.py`). After this pass the validator's
+    actual `ruff check` is checking the post-autofix state, so only
+    semantic-or-stylistic-with-meaning issues land in the report.
+
+    We deliberately ignore exit codes: if ruff isn't installed in the
+    sandbox the actual validator run will surface that, and a missing
+    formatter must not mask a genuine failure. Output is also discarded
+    — `run_validators` records its own command transcripts; the autofix
+    pass is invisible to the agent.
+    """
+    if not paths:
+        return
+    py_paths = [p for p in paths if p.endswith((".py", ".pyi"))]
+    if not py_paths:
+        return
+    # `ruff format` first so whitespace is normalised, then
+    # `ruff check --fix` to pick up I001 (which `format` doesn't sort).
+    await run_command(deps, "ruff", ["format", *py_paths], timeout_s=30)
+    await run_command(
+        deps,
+        "ruff",
+        ["check", "--fix", "--select", _PRE_VALIDATOR_AUTOFIX_SELECT, *py_paths],
+        timeout_s=30,
+    )
+
+
 async def run_validators(
     deps: CoderDeps,
     targets: list[str] | None = None,
@@ -327,6 +397,12 @@ async def run_validators(
             raise ToolInputError(
                 f"unknown validator target {t!r}; choose from {sorted(TARGETS)}"
             )
+
+    # Trivially-auto-fixable lint pass first. Catches the W291 (alembic
+    # Mako trailing whitespace) and I001 (import-order on edits to
+    # scaffold files like `pwdlib.py`) classes before they cost the
+    # agent a retry attempt. See `_pre_validator_autofix`.
+    await _pre_validator_autofix(deps, paths)
 
     commands: list[CommandResult] = []
     issues: list[ValidatorIssue] = []

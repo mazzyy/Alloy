@@ -101,6 +101,24 @@ def _minimal_template(tmp_path: Path) -> Path:
         '{\n  "name": "scaffold-test",\n  "dependencies": {}\n}\n',
         encoding="utf-8",
     )
+    # Real shipped frontend blocks (auth/clerk) patch into
+    # `frontend/src/main.tsx` against `<<ALLOY_PROVIDER_WRAP>>`. Provide
+    # a minimal stub so the catalogue-integration smoke test doesn't
+    # fail with "patches missing file frontend/src/main.tsx" the moment
+    # we ship a frontend-touching block.
+    frontend_src = frontend_pkg / "src"
+    frontend_src.mkdir()
+    (frontend_src / "main.tsx").write_text(
+        "import { StrictMode } from 'react';\n"
+        "import { createRoot } from 'react-dom/client';\n"
+        "createRoot(document.getElementById('root')!).render(\n"
+        "  <StrictMode>\n"
+        "    {/* <<ALLOY_PROVIDER_WRAP>> */}\n"
+        "    <div>scaffold-test</div>\n"
+        "  </StrictMode>\n"
+        ");\n",
+        encoding="utf-8",
+    )
     (src / ".env.example").write_text(
         "POSTGRES_USER=alloy\nPOSTGRES_PASSWORD=alloy\nPOSTGRES_DB=alloy\nSECRET_KEY=s3cret\n",
         encoding="utf-8",

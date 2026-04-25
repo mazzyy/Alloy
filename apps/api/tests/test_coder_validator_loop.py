@@ -728,6 +728,58 @@ def test_looks_like_giveup_rationalisation_accepts_real_summary() -> None:
     assert fragment is None
 
 
+def test_looks_like_giveup_rationalisation_matches_have_not_made_any() -> None:
+    # 9th-regression evasion phrasing. The agent's exact summary on
+    # `backend.project.model`:
+    #
+    #   "I have not made any code changes yet — I only read the file so
+    #   that any upcoming patches can use exact, verbatim context lines.
+    #   Tell me the specific edit you want me to make..."
+    #
+    # The original fragment set caught "did not modify" / "checkpoint
+    # commit" but missed "have not made any" + "tell me the specific
+    # edit". Pin both phrasings so the agent can't drift back.
+    fragment = loop_mod._looks_like_giveup_rationalisation(
+        "I have not made any code changes yet — I only read the file "
+        "so that any upcoming patches can use exact, verbatim context "
+        "lines. Tell me the specific edit you want me to make and I "
+        "will produce a unified diff."
+    )
+    assert fragment is not None
+    # Multiple fragments fire; accept any of them as the trigger.
+    assert fragment in (
+        "have not made any",
+        "not made any code changes",
+        "i only read",
+        "only read the file",
+        "tell me the specific edit",
+        "no code changes yet",
+    )
+
+
+def test_looks_like_giveup_rationalisation_matches_tell_me_what() -> None:
+    # Variant of the same evasion — the agent dropped the "I have not
+    # made" prefix and led with the question. We still want to catch it.
+    fragment = loop_mod._looks_like_giveup_rationalisation(
+        "Tell me what you would like me to change in this file and I "
+        "will emit a patch in the next turn."
+    )
+    assert fragment is not None
+    assert fragment in ("tell me what you would like",)
+
+
+def test_looks_like_giveup_rationalisation_does_not_match_neutral_tell() -> None:
+    # Sanity check: the narrowed "tell me what" patterns must not
+    # collide with innocent uses of those words. A summary that says
+    # "the test will tell me what to expect" should NOT match.
+    fragment = loop_mod._looks_like_giveup_rationalisation(
+        "Added the assertion to tests/test_user.py. Running pytest will "
+        "tell me whether the new branch is reached, which is what I "
+        "needed to verify."
+    )
+    assert fragment is None
+
+
 async def test_giveup_rationalisation_fails_on_final_attempt(
     workspace: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -763,3 +815,89 @@ async def test_giveup_rationalisation_fails_on_final_attempt(
     err = result.attempts[-1].agent_error or ""
     assert "giveup" in err
     assert "fragment" in err
+
+
+async def test_giveup_rationalisation_fails_on_final_attempt_with_touched_paths(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The post-validator branch must also catch giveup-rationalisation.
+
+    The 8th-regression `backend.task.model` outcome had `commit_sha`
+    populated and validators returning ok=True, yet the agent's summary
+    was an admission of non-action. The loop's success branch must
+    short-circuit when the summary matches a giveup phrase, otherwise
+    the build records phantom successes for tasks that didn't really
+    do anything.
+    """
+
+    async def fake_validators(*_a: Any, **_kw: Any) -> ValidatorReport:
+        # Validators run cleanly — the "success branch" is what we're
+        # testing here.
+        return _make_report(ok=True)
+
+    monkeypatch.setattr(loop_mod, "run_validators", fake_validators)
+
+    rationalisation = (
+        "I created a small checkpoint commit so future patches can "
+        "match the tree exactly. I did not modify any app logic; the "
+        "commit is a marker only."
+    )
+    agent = _scripted_agent([rationalisation])
+    deps = CoderDeps(workspace_root=workspace)
+    # Seed touched_paths so the loop takes the post-validator branch
+    # rather than the empty-touched_paths branch (which already has its
+    # own detection covered by the prior test).
+    _mark_written(deps)
+
+    result = await loop_mod.run_task_with_validators(
+        "append the Task model",
+        deps,
+        max_attempts=1,
+        agent=agent,
+    )
+
+    assert result.ok is False, (
+        "post-validator giveup-rationalisation should fail the task "
+        "even though run_validators returned ok=True"
+    )
+    err = result.attempts[-1].agent_error or ""
+    assert "giveup" in err
+    assert "fragment" in err
+
+
+async def test_giveup_rationalisation_retries_when_attempts_remain(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The post-validator branch should retry (not immediately fail) when
+    attempts remain. Asserting that the loop runs the agent again with a
+    nudge keyed on the rationalisation phrase, and that a second-attempt
+    real edit lands as ok=True."""
+
+    async def fake_validators(*_a: Any, **_kw: Any) -> ValidatorReport:
+        return _make_report(ok=True)
+
+    monkeypatch.setattr(loop_mod, "run_validators", fake_validators)
+
+    # Turn 1: rationalisation. Turn 2: real summary.
+    agent = _scripted_agent(
+        [
+            "I did not modify any app logic; just a checkpoint commit.",
+            "Appended the Task model with id, title, status. Committed.",
+        ]
+    )
+    deps = CoderDeps(workspace_root=workspace)
+    _mark_written(deps)
+
+    result = await loop_mod.run_task_with_validators(
+        "append the Task model",
+        deps,
+        max_attempts=2,
+        agent=agent,
+    )
+
+    assert result.ok is True
+    assert result.attempts_used == 2
+    # First attempt: caught as rationalisation.
+    assert "giveup" in (result.attempts[0].agent_error or "")
+    # Second attempt: clean summary, no giveup.
+    assert result.attempts[1].agent_error is None

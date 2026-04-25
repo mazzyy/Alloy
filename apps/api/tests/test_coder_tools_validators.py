@@ -241,8 +241,21 @@ async def test_run_validators_scopes_ruff_and_mypy_to_touched_py_files(
     )
 
     assert report.ok is True
-    # ruff invocation: default ended in `.`; that should be replaced.
-    ruff_args = next(args for b, args in invocations if b == "ruff")
+    # `_pre_validator_autofix` runs ruff twice up front (format + check
+    # --fix) on the touched paths. We only want to assert against the
+    # actual validator invocation here — the one that uses `--output-
+    # format` and feeds parsed issues back into the report. Filter the
+    # autofix calls out by looking for the validator-specific flag.
+    validator_ruff_calls = [
+        args
+        for b, args in invocations
+        if b == "ruff" and "--output-format" in args
+    ]
+    assert validator_ruff_calls, (
+        f"no validator ruff invocation in {invocations!r} — pre-autofix "
+        f"may have suppressed it"
+    )
+    ruff_args = validator_ruff_calls[0]
     assert "." not in ruff_args
     assert "apps/api/app/models/user.py" in ruff_args
     assert "apps/api/app/models/__init__.py" in ruff_args
@@ -313,3 +326,145 @@ async def test_run_validators_whole_repo_when_paths_is_none(
     assert invocations[0][1][-1] == "."
     # mypy still gets the default "app" positional.
     assert invocations[1][1][-1] == "app"
+
+
+async def test_run_validators_mypy_passes_ignore_missing_imports(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """9th-regression: third-party deps without type stubs (pwdlib,
+    argon2, bcrypt, ...) used to fail mypy with `import-not-found` and
+    block the validator loop even though the runtime code was correct.
+
+    The fix is two-pronged: the template's `pyproject.toml` sets
+    `[tool.mypy] ignore_missing_imports = true`, AND the validator's
+    mypy invocation passes `--ignore-missing-imports` as a defensive
+    second layer for projects that lose the override. Pin the flag
+    here so a future refactor can't silently strip it.
+    """
+    invocations: list[tuple[str, list[str]]] = []
+
+    async def recording_runner(
+        _deps: CoderDeps, binary: str, args: list[str], *, timeout_s: int = 60
+    ) -> CommandResult:
+        invocations.append((binary, list(args)))
+        return CommandResult(
+            command=f"{binary} {' '.join(args)}",
+            returncode=0,
+            stdout="",
+            stderr="",
+            duration_s=0.0,
+        )
+
+    monkeypatch.setattr(validators_mod, "run_command", recording_runner)
+
+    # Whole-repo mode — no path scoping should affect the flag.
+    await run_validators(_deps(workspace), targets=["python"])
+    mypy_args_whole = next(args for b, args in invocations if b == "mypy")
+    assert "--ignore-missing-imports" in mypy_args_whole, (
+        f"expected --ignore-missing-imports in {mypy_args_whole!r}"
+    )
+
+    # Scoped mode — flag must survive the path-rewrite.
+    invocations.clear()
+    await run_validators(
+        _deps(workspace),
+        targets=["python"],
+        paths=["backend/app/core/security.py"],
+    )
+    mypy_args_scoped = next(args for b, args in invocations if b == "mypy")
+    assert "--ignore-missing-imports" in mypy_args_scoped, (
+        f"expected --ignore-missing-imports in scoped {mypy_args_scoped!r}"
+    )
+    # The path replacement must still have happened.
+    assert "backend/app/core/security.py" in mypy_args_scoped
+    assert "app" not in mypy_args_scoped
+
+
+# 8th-regression — pre-validator auto-fix pass. Trivially-auto-fixable
+# lint codes (W291 trailing whitespace from the alembic Mako template,
+# I001 import-order on edits to scaffold files like `pwdlib.py`) used to
+# cost the agent an entire validator-loop attempt. The fix runs `ruff
+# format` + `ruff check --fix --select W,I,...` against touched Python
+# paths BEFORE the validator's actual `ruff check`. These tests pin the
+# call sequence and selector against future regressions.
+
+
+async def test_run_validators_runs_pre_validator_autofix_on_touched_py(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    invocations: list[tuple[str, list[str]]] = []
+
+    async def recording_runner(
+        _deps: CoderDeps, binary: str, args: list[str], *, timeout_s: int = 60
+    ) -> CommandResult:
+        invocations.append((binary, list(args)))
+        return CommandResult(
+            command=f"{binary} {' '.join(args)}",
+            returncode=0,
+            stdout="",
+            stderr="",
+            duration_s=0.0,
+        )
+
+    monkeypatch.setattr(validators_mod, "run_command", recording_runner)
+
+    paths = [
+        "backend/app/alembic/versions/abc123_add_task.py",
+        "backend/app/models.py",
+    ]
+    await run_validators(_deps(workspace), targets=["python"], paths=paths)
+
+    # First two calls must be the autofix pass.
+    assert len(invocations) >= 2
+    first_binary, first_args = invocations[0]
+    assert first_binary == "ruff"
+    assert first_args[0] == "format"
+    # `format` call must target every touched Python path.
+    for p in paths:
+        assert p in first_args, f"ruff format missing {p}: {first_args!r}"
+
+    second_binary, second_args = invocations[1]
+    assert second_binary == "ruff"
+    assert second_args[:2] == ["check", "--fix"]
+    assert "--select" in second_args
+    selector_idx = second_args.index("--select")
+    selector = second_args[selector_idx + 1]
+    # The selector must include the codes we know we want to absorb
+    # silently — W291 (alembic Mako trailing whitespace), I001 (import
+    # order on scaffold edits), W292/W293 (blank-line whitespace).
+    for code in ("W291", "W292", "W293", "I001"):
+        assert code in selector, f"autofix selector missing {code}: {selector!r}"
+    for p in paths:
+        assert p in second_args, f"ruff check --fix missing {p}: {second_args!r}"
+
+
+async def test_run_validators_pre_autofix_skips_when_no_py_paths(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Front-end-only touched paths must NOT trigger ruff at all — the
+    autofix is Python-only by design."""
+    invocations: list[str] = []
+
+    async def recording_runner(
+        _deps: CoderDeps, binary: str, args: list[str], *, timeout_s: int = 60
+    ) -> CommandResult:
+        invocations.append(binary)
+        return CommandResult(
+            command=f"{binary} {' '.join(args)}",
+            returncode=0,
+            stdout="",
+            stderr="",
+            duration_s=0.0,
+        )
+
+    monkeypatch.setattr(validators_mod, "run_command", recording_runner)
+
+    await run_validators(
+        _deps(workspace),
+        targets=["python"],
+        paths=["frontend/src/App.tsx", "frontend/src/main.ts"],
+    )
+
+    # No Python paths touched → no ruff invocations at all (autofix
+    # skipped, validator ruff also skipped via the existing scope).
+    assert "ruff" not in invocations

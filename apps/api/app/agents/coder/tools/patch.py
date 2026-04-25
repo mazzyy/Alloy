@@ -64,6 +64,44 @@ _MALFORMED_PATCH_HINT = (
 )
 
 
+# Cap on the file excerpt we embed in apply_patch retry messages.
+# Big enough to anchor most edits (the agent only needs ~40 lines of
+# verbatim context to repatch), small enough that we don't blow the
+# token budget on a 4K-line scaffold file. If the file is larger than
+# this we tell the model so it knows to call read_file for the rest.
+_RETRY_EXCERPT_MAX_BYTES = 8000
+
+
+def _read_file_excerpt(workspace_root: Path, path: str) -> str | None:
+    """Return the first ~8KB of `path` for inclusion in apply_patch errors.
+
+    None if the file does not exist or cannot be read — caller suppresses
+    the embed in that case (the existing "use write_file" hint already
+    covers the missing-file branch). On read errors we swallow the
+    exception: a degraded retry message is strictly better than a
+    crashed apply_patch tool, and the agent will fall back to read_file
+    on the next turn.
+    """
+    try:
+        abs_path = resolve_inside(workspace_root, path)
+    except Exception:  # noqa: BLE001 — path resolution is best-effort here
+        return None
+    if not abs_path.exists() or not abs_path.is_file():
+        return None
+    try:
+        text = abs_path.read_text(encoding="utf-8", errors="replace")
+    except Exception:  # noqa: BLE001 — see docstring
+        return None
+    if len(text) <= _RETRY_EXCERPT_MAX_BYTES:
+        return text
+    truncated = text[:_RETRY_EXCERPT_MAX_BYTES]
+    return (
+        f"{truncated}\n"
+        f"... (file truncated at {_RETRY_EXCERPT_MAX_BYTES} bytes; "
+        f"call `read_file` for the rest)"
+    )
+
+
 _HUNK_HEADER_RE = re.compile(
     r"^@@\s+-(?P<old_start>\d+)(?:,(?P<old_len>\d+))?\s+\+(?P<new_start>\d+)(?:,(?P<new_len>\d+))?\s+@@",
 )
@@ -356,14 +394,26 @@ def register(agent: Agent[CoderDeps, str]) -> None:
             # uncaught error that blows up the run. Direct callers of
             # `_apply_patch` (tests, the validator-loop retry path) keep
             # seeing the structured `PatchApplyError` with `.details`.
+            #
+            # Include the actual file contents (truncated) inline. Phase-1
+            # traces showed the agent looping through three apply_patch
+            # ModelRetries — each one with the same stale context — and
+            # exhausting pydantic-ai's per-tool budget. Telling the model
+            # "go re-read with read_file" in prose was insufficient:
+            # under low reasoning effort it would re-emit a near-identical
+            # patch instead of issuing the read_file call. Embedding the
+            # file slice directly in the retry payload eliminates that
+            # branch — the model always has fresh anchors to copy from.
             detail_lines = [f"- {d}" for d in (exc.details or [])]
+            file_excerpt = _read_file_excerpt(ctx.deps.workspace_root, path)
             raise ModelRetry(
                 "apply_patch failed: "
                 + str(exc)
                 + ("\n" + "\n".join(detail_lines) if detail_lines else "")
-                + "\nRe-read the file (read_file) and emit a patch whose context "
-                "matches the current contents exactly, or use write_file for a "
-                "fresh file."
+                + (f"\n\nCurrent file contents of {path}:\n{file_excerpt}" if file_excerpt else "")
+                + "\nEmit a new patch whose @@ context lines match the "
+                "above byte-for-byte, or use write_file if the file does "
+                "not yet exist."
             ) from exc
         except ToolInputError as exc:
             # Malformed patch (empty, no hunks, bogus header, …).

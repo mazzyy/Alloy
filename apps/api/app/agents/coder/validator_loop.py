@@ -105,6 +105,38 @@ _GIVEUP_RATIONALISATION_FRAGMENTS: tuple[str, ...] = (
     "failed to apply",
     "patch could not",
     "without modifying",
+    # 9th-regression phrasings — the agent learned new evasions after
+    # the initial fragment set went in. Sample summary that slipped
+    # past detection: "I have not made any code changes yet — I only
+    # read the file so that any upcoming patches can use exact,
+    # verbatim context lines. Tell me the specific edit you want me
+    # to make..."
+    "have not made any",
+    "haven't made any",
+    "not made any code changes",
+    "not made any edits",
+    "not made any changes",
+    "no code changes yet",
+    "no changes yet",
+    "i only read",
+    "only read the file",
+    "tell me the specific edit",
+    "tell me what you would like",
+    "tell me what changes",
+    "tell me what to change",
+    "tell me what to add",
+    "let me know what you would like",
+    "let me know what changes",
+    "let me know what to change",
+    "what specific edit",
+    "what should i change",
+    "what should i add",
+    "i have not yet",
+    "i haven't yet",
+    "i did not make",
+    "i didn't make",
+    "i won't make changes",
+    "i will not make changes",
 )
 
 
@@ -514,17 +546,37 @@ async def run_task_with_validators(
 
         scope_paths = sorted(deps.touched_paths)
         report = await run_validators(deps, list(targets), paths=scope_paths)
+
+        # Even with non-empty touched_paths the agent can still
+        # rationalise a giveup as success — e.g. it `read_file`-d a
+        # path then issued a `git_commit("checkpoint", allow_empty=True)`,
+        # which doesn't write but does flip touched_paths via a prior
+        # successful no-op apply_patch (or, more commonly, leaves
+        # touched_paths populated from the failed earlier attempt's
+        # message-history-carried state). The 8th-regression trace
+        # showed the agent producing a 350-char "I did not modify any
+        # app logic" summary while validators returned ok=True
+        # (because the only "touched" path was a file it had read but
+        # not changed). Treat the summary phrase as authoritative when
+        # it appears: the agent told us what it did, take it at its
+        # word.
+        rationalisation = _looks_like_giveup_rationalisation((output or "").strip())
         attempts.append(
             ValidatorLoopAttempt(
                 attempt=attempt_idx,
                 agent_output=output,
                 agent_turn_count=turn_count,
                 report=report,
-                agent_error=None,
+                agent_error=(
+                    f"giveup rationalised as success "
+                    f"(matched fragment {rationalisation!r})"
+                    if rationalisation is not None
+                    else None
+                ),
             )
         )
 
-        if report.ok:
+        if report.ok and rationalisation is None:
             log.info(
                 "validator_loop.success",
                 attempt=attempt_idx,
@@ -537,6 +589,42 @@ async def run_task_with_validators(
                 attempts=attempts,
                 final_report=report,
             )
+
+        if report.ok and rationalisation is not None:
+            log.warning(
+                "validator_loop.giveup_rationalisation_post_validator",
+                attempt=attempt_idx,
+                turn_count=turn_count,
+                rationalisation=rationalisation,
+                touched_count=len(deps.touched_paths),
+            )
+            if attempt_idx >= max_attempts:
+                # Out of attempts. Validators passed but the agent's
+                # own summary is an admission of non-action. Surface
+                # as failure so the outer loop rolls back.
+                return ValidatorLoopResult(
+                    ok=False,
+                    attempts_used=attempt_idx,
+                    max_attempts=max_attempts,
+                    attempts=attempts,
+                    final_report=report,
+                )
+            current_prompt = (
+                f"Attempt {attempt_idx + 1}/{max_attempts} — your "
+                f"previous summary admitted non-action (matched the "
+                f"giveup phrase {rationalisation!r}) even though the "
+                f"validators ran cleanly. The validator pass is "
+                f"meaningless if the intended edits were not made.\n"
+                "\n"
+                "Make the actual changes the task requires this turn. "
+                "If you previously committed a checkpoint with no "
+                "real edits, that commit does NOT count as task "
+                "completion — re-run the planned writes (`apply_patch` "
+                "or `write_file`), verify each tool result has "
+                "`ok=True`, then `git_commit` with a real summary of "
+                "what changed."
+            )
+            continue
 
         log.info(
             "validator_loop.attempt_failed",
