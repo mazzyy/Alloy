@@ -129,6 +129,62 @@ def test_human_review_required_carries_question_and_options() -> None:
     assert exc.options == ["yes", "no"]
 
 
+# The generic-question rejection logic is the Phase-1 fix for an agent
+# regression where the Coder Agent escalated `request_human_review`
+# after a single apply_patch context-mismatch with a content-free
+# question ("what file should I (re)attempt now?"). The tool now feeds
+# that back as ModelRetry so the agent gets one more turn to either
+# write a real question or — better — go retry the underlying tool.
+
+
+def test_looks_generic_rejects_too_short_question() -> None:
+    from app.agents.coder.tools.review import _looks_generic
+
+    reason = _looks_generic("help?")
+    assert reason is not None
+    assert "too short" in reason
+
+
+def test_looks_generic_rejects_what_should_i_do() -> None:
+    from app.agents.coder.tools.review import _looks_generic
+
+    # Long enough to clear the length floor, but matches a generic
+    # template fragment.
+    reason = _looks_generic(
+        "What should I do next? The previous attempt failed and I am "
+        "uncertain how to proceed."
+    )
+    assert reason is not None
+    assert "generic placeholder" in reason
+    assert "what should i do" in reason
+
+
+def test_looks_generic_rejects_what_specific_file_or_change() -> None:
+    from app.agents.coder.tools.review import _looks_generic
+
+    # The exact wording from the regression that motivated this guard.
+    reason = _looks_generic(
+        "The previous attempt to apply a patch failed due to context "
+        "mismatch. I need clarification: what specific file or change "
+        "should I (re)attempt now?"
+    )
+    assert reason is not None
+    assert "generic placeholder" in reason
+
+
+def test_looks_generic_accepts_specific_question() -> None:
+    from app.agents.coder.tools.review import _looks_generic
+
+    # Has length, includes what was tried + the concrete ambiguity.
+    reason = _looks_generic(
+        "alembic_autogenerate produced op.drop_table('legacy_users') "
+        "alongside the new users.created_at column. The drop is "
+        "destructive — should I keep the legacy_users table and only "
+        "add the column, or proceed with the drop?"
+    )
+    assert reason is None
+
+
 # ── git_commit ─────────────────────────────────────────────────────────
 
 

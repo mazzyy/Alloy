@@ -493,7 +493,17 @@ async def test_loop_skips_validators_entirely_when_nothing_touched(
 
     monkeypatch.setattr(loop_mod, "run_validators", fake_validators)
 
-    agent = _scripted_agent(["nothing to do"])
+    # The output must be substantive enough to read as "intentional no-op
+    # completion" rather than "silent giveup". Anything under
+    # _MIN_NO_WRITE_OUTPUT_CHARS (80) chars is treated as a giveup; here
+    # we provide a one-sentence rationale that's well above the floor.
+    agent = _scripted_agent(
+        [
+            "The target file already contains the User model with all "
+            "the fields specified in the AppSpec, so this task is "
+            "already complete and no edits are needed."
+        ]
+    )
     deps = CoderDeps(workspace_root=workspace)
 
     result = await loop_mod.run_task_with_validators(
@@ -506,3 +516,96 @@ async def test_loop_skips_validators_entirely_when_nothing_touched(
     assert result.final_report.ok is True
     assert result.final_report.issue_count == 0
     assert result.final_report.commands == []
+
+
+# ── Silent-giveup detection ────────────────────────────────────────────
+
+
+async def test_silent_giveup_on_final_attempt_fails_loud(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: an agent that produces neither writes nor a meaningful
+    summary used to pass through the `not deps.touched_paths` short-
+    circuit as ok=True. That masked a class of "agent gave up after one
+    apply_patch failure" bugs as silent green builds. The loop now treats
+    a sub-floor empty-output turn as a failed attempt; on the *final*
+    attempt it surfaces ok=False so the outer build loop rolls back.
+
+    We use a short-but-non-empty output ("ok") rather than the empty
+    string here — pydantic-ai's `output_type=str` agent rejects an
+    empty FunctionModel turn as invalid output before the validator
+    loop ever sees it, which would land us in the unrelated
+    `agent_error` branch instead of the silent-giveup branch we're
+    actually testing."""
+
+    async def fake_validators(*_a: Any, **_kw: Any) -> ValidatorReport:
+        # Should never be called — touched_paths is empty.
+        raise AssertionError("validators must not run when nothing was touched")
+
+    monkeypatch.setattr(loop_mod, "run_validators", fake_validators)
+
+    # Sub-floor non-empty output → silent giveup.
+    agent = _scripted_agent(["ok"])
+    deps = CoderDeps(workspace_root=workspace)
+
+    result = await loop_mod.run_task_with_validators(
+        "do something", deps, max_attempts=1, agent=agent
+    )
+    assert result.ok is False
+    assert result.attempts_used == 1
+    assert result.attempts[-1].agent_error is not None
+    assert "silent giveup" in result.attempts[-1].agent_error
+
+
+async def test_silent_giveup_retries_with_nudge(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When attempts remain, a silent-giveup turn retries with the
+    no-write nudge prompt rather than declaring success. The retry
+    prompt should specifically include "no edits and no summary" so the
+    agent knows what went wrong."""
+
+    seen_prompts: list[str] = []
+
+    async def fake_validators(*_a: Any, **_kw: Any) -> ValidatorReport:
+        return _make_report(ok=True)
+
+    monkeypatch.setattr(loop_mod, "run_validators", fake_validators)
+
+    # Wrap the loop's own _run_agent_once to capture the prompt for each
+    # attempt — that's how we prove the retry prompt got built correctly.
+    real_run_once = loop_mod._run_agent_once
+
+    async def spy_run_once(agent: Any, prompt: str, deps: CoderDeps, hist: Any) -> Any:
+        seen_prompts.append(prompt)
+        return await real_run_once(agent, prompt, deps, hist)
+
+    monkeypatch.setattr(loop_mod, "_run_agent_once", spy_run_once)
+
+    # Attempt 1: sub-floor non-empty (silent giveup). Attempt 2: a
+    # substantive summary that's well above the floor — still no
+    # writes, so the loop accepts it as an intentional no-op
+    # completion.
+    agent = _scripted_agent(
+        [
+            "ok",
+            "After reading the file I confirmed the User model already "
+            "has every field requested in the spec, so no edits are "
+            "required for this task.",
+        ]
+    )
+    deps = CoderDeps(workspace_root=workspace)
+
+    result = await loop_mod.run_task_with_validators(
+        "review existing model",
+        deps,
+        max_attempts=2,
+        agent=agent,
+    )
+    # Attempt 1 silent → retry. Attempt 2 substantive → ok.
+    assert result.ok is True
+    assert result.attempts_used == 2
+    assert len(seen_prompts) == 2
+    # The retry prompt for attempt 2 must mention the no-write nudge.
+    assert "no edits and no summary" in seen_prompts[1]
+    assert "read_file" in seen_prompts[1]

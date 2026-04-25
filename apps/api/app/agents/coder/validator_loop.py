@@ -65,6 +65,36 @@ if TYPE_CHECKING:
 _TOP_K_ISSUES = 20
 
 
+# Below this many non-whitespace chars in `agent_output` *and* zero
+# touched paths, we treat the attempt as a silent giveup rather than an
+# intentional no-op completion. 80 chars is roughly "I did X and
+# committed it." — anything substantially shorter is content-free.
+_MIN_NO_WRITE_OUTPUT_CHARS = 80
+
+
+# Retry prompt for the "agent produced no writes and no summary" case.
+# Deliberately concrete: tell the agent *what to do next* rather than
+# just "try again". Most silent-giveup cases are an agent that hit one
+# apply_patch failure and bailed without re-reading the file.
+_NO_WRITE_RETRY_PROMPT = (
+    "Attempt {attempt}/{max_attempts} — your previous turn produced no "
+    "edits and no summary. That is a giveup, not a completion.\n"
+    "\n"
+    "If `apply_patch` failed, you must:\n"
+    "  1. `read_file` the target so your context anchors match the "
+    "actual current contents (the file may already contain the "
+    "scaffold's existing User/Item classes — your patch context must "
+    "include them verbatim).\n"
+    "  2. Re-emit the patch with verbatim context.\n"
+    "  3. If the file does not yet exist, use `write_file` instead.\n"
+    "\n"
+    "If you genuinely believe the task is already complete, say so "
+    "explicitly in your final reply (one sentence stating *why* the "
+    "current code already satisfies the task) and `git_commit` an empty "
+    "marker if you haven't yet. Do not return an empty string."
+)
+
+
 def _format_issue(issue: ValidatorIssue) -> str:
     """Render one diagnostic as a single-line bullet for the retry prompt.
 
@@ -251,14 +281,27 @@ async def run_task_with_validators(
         # lint/type debt in unrelated files doesn't masquerade as "this
         # attempt's failures" and derail the model into lint-chasing.
         #
-        # If the agent wrote nothing, skip validators entirely and return
-        # a clean empty report. Rationale: ruff/mypy/pytest check *code
-        # quality*, not spec compliance — running them against the whole
-        # repo when nothing changed is guaranteed to re-surface the
-        # existing lint debt we were just trying to hide from the model,
-        # and "did the agent actually do anything?" is the outer build
-        # loop's responsibility (#24 LangGraph, or a dedicated spec-
-        # assertion step), not this loop's.
+        # If the agent wrote nothing, skip validators entirely. There
+        # are two shapes of "no writes" we need to distinguish:
+        #
+        #   (a) the agent intentionally completed a no-op task and
+        #       summarised what it did — common for global ops like
+        #       `frontend.routes.register` where TanStack Router
+        #       regenerates routeTree.gen.ts on its own. We accept
+        #       these and return ok=True; the outer build loop's
+        #       commit-SHA check is the authoritative "did anything
+        #       change?" signal.
+        #
+        #   (b) the agent gave up silently — emitted no edits *and* no
+        #       meaningful summary. This is the regression we hit during
+        #       Phase-1 verification: an agent that hit a single
+        #       apply_patch context-mismatch sometimes returned an empty
+        #       string, the validator loop swallowed it as ok=True, and
+        #       the build "succeeded" without actually doing anything.
+        #       We retry with a targeted nudge, or — if this was the last
+        #       attempt — fail loudly so the outer loop rolls back and
+        #       reports the failure rather than committing a phantom
+        #       success.
         if not deps.touched_paths:
             empty_report = ValidatorReport(
                 ok=True,
@@ -266,27 +309,55 @@ async def run_task_with_validators(
                 issues=[],
                 commands=[],
             )
+            output_stripped = (output or "").strip()
+            silent_giveup = len(output_stripped) < _MIN_NO_WRITE_OUTPUT_CHARS
             attempts.append(
                 ValidatorLoopAttempt(
                     attempt=attempt_idx,
                     agent_output=output,
                     agent_turn_count=turn_count,
                     report=empty_report,
-                    agent_error=None,
+                    agent_error=("silent giveup (no writes, no summary)"
+                                 if silent_giveup else None),
                 )
             )
-            log.info(
-                "validator_loop.no_writes_skip_validators",
+            if not silent_giveup:
+                log.info(
+                    "validator_loop.no_writes_skip_validators",
+                    attempt=attempt_idx,
+                    turn_count=turn_count,
+                    output_chars=len(output_stripped),
+                )
+                return ValidatorLoopResult(
+                    ok=True,
+                    attempts_used=attempt_idx,
+                    max_attempts=max_attempts,
+                    attempts=attempts,
+                    final_report=empty_report,
+                )
+
+            # Silent giveup branch — retry or fail.
+            log.warning(
+                "validator_loop.silent_giveup",
                 attempt=attempt_idx,
                 turn_count=turn_count,
+                output_chars=len(output_stripped),
             )
-            return ValidatorLoopResult(
-                ok=True,
-                attempts_used=attempt_idx,
-                max_attempts=max_attempts,
-                attempts=attempts,
-                final_report=empty_report,
+            if attempt_idx >= max_attempts:
+                # Out of attempts. Surface as a failure so the outer
+                # loop rolls back. final_report stays as the empty one
+                # so callers can still introspect commands list.
+                return ValidatorLoopResult(
+                    ok=False,
+                    attempts_used=attempt_idx,
+                    max_attempts=max_attempts,
+                    attempts=attempts,
+                    final_report=empty_report,
+                )
+            current_prompt = _NO_WRITE_RETRY_PROMPT.format(
+                attempt=attempt_idx + 1, max_attempts=max_attempts
             )
+            continue
 
         scope_paths = sorted(deps.touched_paths)
         report = await run_validators(deps, list(targets), paths=scope_paths)
