@@ -282,17 +282,37 @@ async def _build_event_stream(
 
         # Insert the BuildRun row in its own transaction so a watcher on
         # /build/runs/{id} can see "running" before the loop returns.
-        async with session_factory() as run_session:
-            run = await create_build_run(
-                run_session,
-                project=project,
-                plan_version_id=plan_row.id,
-                thread_id=thread_id,
-                sandbox_id=sandbox_id,
-                tasks_total=len(plan.ops),
+        # Schema errors here (e.g. `relation "build_runs" does not
+        # exist` because the operator forgot `alembic upgrade head` in a
+        # non-local env) surface as a clean SSE error rather than a
+        # raw asyncpg traceback bleeding into the stream.
+        try:
+            async with session_factory() as run_session:
+                run = await create_build_run(
+                    run_session,
+                    project=project,
+                    plan_version_id=plan_row.id,
+                    thread_id=thread_id,
+                    sandbox_id=sandbox_id,
+                    tasks_total=len(plan.ops),
+                )
+                await run_session.commit()
+                run_id = run.id
+        except Exception as exc:  # noqa: BLE001 — surface as SSE error
+            _log.exception("build.run.create_failed", error=str(exc))
+            hint = ""
+            text = f"{type(exc).__name__}: {exc}"
+            if "build_runs" in text and "does not exist" in text:
+                hint = (
+                    " — run `alembic upgrade head` from apps/api against "
+                    "the gateway database; the build_runs migration "
+                    "(0002_phase1_build_runs) hasn't been applied."
+                )
+            yield _sse(
+                "error",
+                {"message": f"Could not record BuildRun: {exc}{hint}"},
             )
-            await run_session.commit()
-            run_id = run.id
+            return
 
         yield _sse(
             "status",

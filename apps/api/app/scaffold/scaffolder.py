@@ -228,8 +228,19 @@ def _git_init(target_dir: Path, report: ScaffoldReport) -> None:
     as `feat: scaffold` after validating the tree runs.
     """
     try:
+        # `git init -b <branch>` is Git 2.28+ (July 2020). The Xcode CLI
+        # tools git on older macOS still doesn't have it, so we do the
+        # portable two-step: plain `init`, then point HEAD at main via
+        # `symbolic-ref` (works on every git that ships worktrees).
         subprocess.run(
-            ["git", "init", "-b", "main"],
+            ["git", "init"],
+            cwd=target_dir,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            ["git", "symbolic-ref", "HEAD", "refs/heads/main"],
             cwd=target_dir,
             check=True,
             capture_output=True,

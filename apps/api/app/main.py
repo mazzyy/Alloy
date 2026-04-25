@@ -24,6 +24,7 @@ from starlette.middleware.cors import CORSMiddleware
 from app.api.router import api_router
 from app.core.config import settings
 from app.core.logging import configure_logging
+from app.core.migrations import ensure_schema_for_environment
 
 configure_logging()
 log = structlog.get_logger(__name__)
@@ -47,6 +48,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             traces_sample_rate=0.1,
             profiles_sample_rate=0.1,
         )
+    # Self-heal the gateway schema in local dev (auto `alembic upgrade
+    # head`); in staging/prod we *check* and log loudly instead of
+    # silently mutating the schema. Without this, adding a migration
+    # like `0002_phase1_build_runs` lands a fresh dev DB in a state
+    # where the first /build/run dies mid-stream with `relation
+    # "build_runs" does not exist`.
+    await ensure_schema_for_environment()
     yield
     log.info("alloy.api.shutdown")
 

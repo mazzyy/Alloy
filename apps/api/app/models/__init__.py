@@ -7,6 +7,6 @@ import `app.models` as the single seam.
 
 from __future__ import annotations
 
-from app.models.project import AppSpecVersion, BuildPlanVersion, Project
+from app.models.project import AppSpecVersion, BuildPlanVersion, BuildRun, Project
 
-__all__ = ["Project", "AppSpecVersion", "BuildPlanVersion"]
+__all__ = ["Project", "AppSpecVersion", "BuildPlanVersion", "BuildRun"]

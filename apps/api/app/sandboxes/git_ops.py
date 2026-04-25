@@ -69,14 +69,28 @@ async def ensure_repo(cwd: Path) -> None:
     """Initialise a git repo at `cwd` if there isn't one already.
 
     Idempotent — safe to call on every `manager.boot()`.
+
+    `git init -b <branch>` was added in Git 2.28 (July 2020). The Xcode
+    Command Line Tools git on older macOS — and a surprising number of
+    corporate-baseline Linux installs — are still pre-2.28, so `-b main`
+    blows up with `unknown switch \`b'`. We do the portable two-step:
+    plain `git init`, then point HEAD at refs/heads/main via
+    `symbolic-ref` (works on every git that has worktrees, i.e. ≥ 2.5).
     """
+    from app.sandboxes.types import SandboxError
+
     if (cwd / ".git").exists():
         return
-    res = await _git(["init", "-b", "main"], cwd)
+    res = await _git(["init"], cwd)
     if not res.ok:
-        from app.sandboxes.types import SandboxError
-
         raise SandboxError(f"git init failed: {res.stderr.strip()}")
+    # Pin the initial branch to `main` regardless of git's default
+    # (older git defaults to `master`; newer git honours
+    # `init.defaultBranch`). Doing this *before* the first commit means
+    # the first commit lands on `main` cleanly, no rename needed.
+    head = await _git(["symbolic-ref", "HEAD", "refs/heads/main"], cwd)
+    if not head.ok:
+        raise SandboxError(f"git symbolic-ref failed: {head.stderr.strip()}")
 
 
 async def commit_all(

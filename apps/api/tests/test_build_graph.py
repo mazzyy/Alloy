@@ -150,7 +150,11 @@ async def workspace(tmp_path: Path) -> Path:
     """
     (tmp_path / "apps" / "api" / "app" / "models").mkdir(parents=True)
     (tmp_path / "README.md").write_text("# test\n", encoding="utf-8")
-    await _git(["init", "-b", "main"], tmp_path)
+    # Pre-2.28 git (Xcode CLI tools, miniforge bundle) doesn't accept
+    # `init -b <branch>` — match the portable pattern used in
+    # `git_ops.ensure_repo`.
+    await _git(["init"], tmp_path)
+    await _git(["symbolic-ref", "HEAD", "refs/heads/main"], tmp_path)
     await _git(["add", "-A"], tmp_path)
     await _git(["commit", "-m", "initial"], tmp_path)
     return tmp_path
