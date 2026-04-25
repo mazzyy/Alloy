@@ -49,18 +49,50 @@ _MIN_QUESTION_LEN = 40
 # match. Curated from real failure traces during Phase-1 verification —
 # every one of these patterns showed up as a regression where the agent
 # escalated on a first patch failure instead of re-reading the file.
+#
+# The list is union-of-symptoms, not orthogonal — overlapping fragments
+# are fine, the goal is to catch the model's evasions across rephrases.
 _GENERIC_QUESTION_FRAGMENTS: tuple[str, ...] = (
+    # "what should I … ?" family
     "what should i do",
+    "what should i edit",
+    "what should i change",
+    "what should i write",
+    "what should i (re)attempt",
+    "what should i reattempt",
+    # "what would you like / want me to … ?" family
     "what would you like me to do",
+    "what would you like me to edit",
+    "what do you want me to",
+    # "what (specific) file/change/code … ?" family
     "what specific file or change",
     "what file or change",
+    "which file and change",
+    "which file or change",
+    "what file should i",
+    "which file should i",
+    # "please specify / clarify / describe / provide" family
     "please specify",
     "please clarify",
+    "please describe",
+    "please provide",
+    # "give me / provide … instructions/task" family
+    "give me exact instructions",
+    "give me instructions",
+    "provide the exact task",
+    "provide exact instructions",
+    "provide instructions",
+    # "I need clarification / I'm uncertain" family
+    "i need clarification",
+    "i am uncertain how to proceed",
+    "i'm uncertain how to proceed",
+    # Generic "should I retry?" without specifics
     "should i (re)attempt",
     "should i reattempt",
-    "what do you want me to",
-    "give me exact instructions",
-    "provide the exact task",
+    "should i retry",
+    # Agent leaking pydantic-ai internals into its question
+    "unexpectedmodelbehavior",
+    "exceeded maximum retries",
 )
 
 

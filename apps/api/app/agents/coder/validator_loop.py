@@ -113,6 +113,68 @@ def _format_issue(issue: ValidatorIssue) -> str:
     return f"- {head} — {issue.message}" if head else f"- {issue.message}"
 
 
+def _build_agent_error_retry_prompt(
+    agent_error: str, attempt: int, max_attempts: int
+) -> str:
+    """Build a retry prompt for the agent-crash branch.
+
+    Deliberately keeps the raw exception repr OUT of the prompt because
+    past Phase-1 traces show the agent copy/pasting things like
+    `UnexpectedModelBehavior('Exceeded maximum retries...')` directly
+    into a `request_human_review` question — surfacing pydantic-ai
+    internals to the user as if it were a meaningful question.
+
+    We classify the failure shape from a substring sniff so the nudge
+    can be specific:
+
+    * `UnexpectedModelBehavior` / `Exceeded maximum retries` →
+      pydantic-ai exhausted retries on a tool call. The model needs to
+      step back and re-read the target file, NOT escalate.
+    * `apply_patch` → the patch tool itself raised. Same advice — re-
+      read and retry with verbatim context.
+    * anything else → generic "try a different approach" nudge.
+    """
+    err_lower = (agent_error or "").lower()
+    if (
+        "unexpectedmodelbehavior" in err_lower
+        or "exceeded maximum" in err_lower
+    ):
+        cause = (
+            "Your previous attempt exhausted pydantic-ai's per-call retry "
+            "budget — almost always because `apply_patch` kept failing on "
+            "stale context."
+        )
+    elif "apply_patch" in err_lower or "patchapplyerror" in err_lower:
+        cause = (
+            "Your previous attempt failed inside `apply_patch` — the "
+            "context anchors didn't match the file's actual contents."
+        )
+    else:
+        cause = "Your previous attempt failed before producing a result."
+
+    return (
+        f"Attempt {attempt}/{max_attempts}.\n"
+        f"{cause}\n"
+        "\n"
+        "Recover step by step:\n"
+        "  1. `read_file` the target so you can see the *actual current "
+        "contents* of the file (it likely already contains the "
+        "scaffold's existing User/Item classes — your next patch's "
+        "context must include them verbatim).\n"
+        "  2. If the file does NOT yet exist, call `write_file` to "
+        "create it. `apply_patch` refuses to operate on a non-existent "
+        "path.\n"
+        "  3. Otherwise, emit a tight `apply_patch` whose @@ context "
+        "lines match the current file contents byte-for-byte.\n"
+        "\n"
+        "Do NOT call `request_human_review` for this — the failure is "
+        "stale context, not ambiguity. Only escalate if you re-read the "
+        "file, attempted the patch with verbatim context, and the patch "
+        "still cannot land for a structural reason you can articulate "
+        "(e.g. the spec is internally contradictory)."
+    )
+
+
 def _build_retry_prompt(report: ValidatorReport, attempt: int, max_attempts: int) -> str:
     """Turn a failed ValidatorReport into a targeted retry instruction.
 
@@ -243,7 +305,7 @@ async def run_task_with_validators(
         turn_count = _count_turns(new_messages)
 
         if agent_error is not None:
-            # Agent crashed; record and retry with a generic nudge.
+            # Agent crashed; record and retry with a sanitised nudge.
             attempts.append(
                 ValidatorLoopAttempt(
                     attempt=attempt_idx,
@@ -261,18 +323,16 @@ async def run_task_with_validators(
             # Final attempt — bail out with ok=False.
             if attempt_idx >= max_attempts:
                 break
-            # Next attempt: retry with a neutral nudge. Don't prescribe
-            # a specific tool — the last crash may well have been in
-            # apply_patch itself, in which case telling the model to
-            # prefer apply_patch is actively misleading. The model's
-            # own retry-hint context is already in message_history if
-            # pydantic-ai produced any.
-            current_prompt = (
-                f"The previous attempt failed with: {agent_error}\n"
-                "Try a different approach. Re-read any file you're about "
-                "to edit so your patch context matches the current "
-                "contents exactly, and fall back to write_file for "
-                "brand-new files."
+            # Next attempt: retry with a *sanitised* nudge. Crucially we
+            # do NOT include the raw `agent_error` repr in the prompt —
+            # past traces show the agent copy/pasting things like
+            # `UnexpectedModelBehavior('Exceeded maximum retries...')`
+            # straight into a `request_human_review` question. That is
+            # noise to the human and hides the real failure (the agent's
+            # patch context didn't match). Instead, use a plain-English
+            # nudge keyed on the failure shape.
+            current_prompt = _build_agent_error_retry_prompt(
+                agent_error, attempt_idx + 1, max_attempts
             )
             continue
 

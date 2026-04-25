@@ -609,3 +609,70 @@ async def test_silent_giveup_retries_with_nudge(
     # The retry prompt for attempt 2 must mention the no-write nudge.
     assert "no edits and no summary" in seen_prompts[1]
     assert "read_file" in seen_prompts[1]
+
+
+# ── Sanitised agent-crash retry prompt (7th-regression guard) ─────────
+#
+# Prior to the 7th-regression fix, the agent-crash branch built its
+# retry prompt with a raw f-string containing the exception repr. That
+# repr leaked into pydantic-ai's message log, and the next turn the
+# agent dutifully copy/pasted `UnexpectedModelBehavior('Exceeded
+# maximum retries (1) for output validation')` into a
+# `request_human_review` question — surfacing pydantic-ai internals to
+# the human as if they were a meaningful question. The fix is
+# `_build_agent_error_retry_prompt`, which classifies the failure shape
+# from a substring sniff and emits a plain-English nudge with concrete
+# recovery steps. These tests pin three things:
+#   1. the raw repr never appears in the prompt (any of its dunder
+#      tokens or exception class names),
+#   2. the right "cause" branch fires for each error family, and
+#   3. the prompt still tells the agent *not* to escalate via
+#      `request_human_review` — that's the whole point.
+
+
+def test_agent_error_retry_prompt_strips_unexpected_model_behavior() -> None:
+    raw_repr = (
+        "UnexpectedModelBehavior('Exceeded maximum retries (1) for "
+        "output validation')"
+    )
+    out = loop_mod._build_agent_error_retry_prompt(raw_repr, attempt=2, max_attempts=3)
+
+    # Header carries the attempt counters.
+    assert "Attempt 2/3" in out
+    # The raw repr — including the exception class name and the
+    # parenthetical message — must NOT appear in the prompt.
+    assert "UnexpectedModelBehavior" not in out
+    assert "Exceeded maximum retries (1)" not in out
+    # The "exhausted retry budget" cause branch fired.
+    assert "exhausted pydantic-ai's per-call retry budget" in out
+    # And the prompt explicitly forbids escalation for this failure.
+    assert "Do NOT call `request_human_review`" in out
+
+
+def test_agent_error_retry_prompt_apply_patch_branch() -> None:
+    out = loop_mod._build_agent_error_retry_prompt(
+        "PatchApplyError: context anchors did not match",
+        attempt=3,
+        max_attempts=3,
+    )
+    # Specific cause branch.
+    assert "context anchors didn't match" in out
+    # The raw repr leak is still suppressed even though the keyword
+    # match succeeded — the prompt is a fixed template.
+    assert "PatchApplyError" not in out
+    # Recovery steps are present.
+    assert "read_file" in out
+    assert "verbatim context" in out
+
+
+def test_agent_error_retry_prompt_generic_branch() -> None:
+    out = loop_mod._build_agent_error_retry_prompt(
+        "RuntimeError('something else went wrong')",
+        attempt=2,
+        max_attempts=3,
+    )
+    # Falls through to the generic cause sentence.
+    assert "failed before producing a result" in out
+    # Still no leakage of the repr.
+    assert "RuntimeError" not in out
+    assert "something else went wrong" not in out

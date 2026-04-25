@@ -185,6 +185,72 @@ def test_looks_generic_accepts_specific_question() -> None:
     assert reason is None
 
 
+# 7th-regression phrasings — the user reported a build pause with this
+# question shape: "The previous apply_patch retries exceeded
+# (UnexpectedModelBehavior). I need clarification which file and change
+# you want me to make next. What should I edit?". The original filter
+# only caught "what should I do" / "what specific file or change". We
+# expanded the fragment list to catch "what should I edit", "which file
+# and change", "I need clarification", and the `UnexpectedModelBehavior`
+# leak — these tests pin those phrasings against future regressions.
+
+
+def test_looks_generic_rejects_what_should_i_edit() -> None:
+    from app.agents.coder.tools.review import _looks_generic
+
+    reason = _looks_generic(
+        "The previous attempt failed and I am unsure how to proceed. "
+        "What should I edit in the next turn?"
+    )
+    assert reason is not None
+    assert "generic placeholder" in reason
+    assert "what should i edit" in reason
+
+
+def test_looks_generic_rejects_which_file_and_change() -> None:
+    from app.agents.coder.tools.review import _looks_generic
+
+    # The exact phrase from the 7th regression's pause message.
+    reason = _looks_generic(
+        "The previous apply_patch retries exceeded the budget. I need "
+        "clarification which file and change you want me to make next."
+    )
+    assert reason is not None
+    assert "generic placeholder" in reason
+
+
+def test_looks_generic_rejects_unexpected_model_behavior_leak() -> None:
+    from app.agents.coder.tools.review import _looks_generic
+
+    # If the agent leaks pydantic-ai's exception class name into its
+    # question we want to reject it — the human can't act on
+    # `UnexpectedModelBehavior('Exceeded maximum retries (1)')`.
+    reason = _looks_generic(
+        "The previous apply_patch retries exceeded "
+        "(UnexpectedModelBehavior). Please advise on a path forward."
+    )
+    assert reason is not None
+    assert "generic placeholder" in reason
+    # Either fragment may match first; the important thing is that the
+    # leaky question is rejected.
+    assert (
+        "unexpectedmodelbehavior" in reason
+        or "exceeded maximum retries" in reason
+    )
+
+
+def test_looks_generic_rejects_i_need_clarification() -> None:
+    from app.agents.coder.tools.review import _looks_generic
+
+    reason = _looks_generic(
+        "The patch could not be applied successfully on the last turn. "
+        "I need clarification before I retry the operation."
+    )
+    assert reason is not None
+    assert "generic placeholder" in reason
+    assert "i need clarification" in reason
+
+
 # ── git_commit ─────────────────────────────────────────────────────────
 
 

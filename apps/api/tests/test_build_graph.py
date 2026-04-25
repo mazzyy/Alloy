@@ -265,15 +265,18 @@ async def test_middle_task_failure_skips_subsequent_tasks_and_rolls_back(
         first_line = task_prompt.splitlines()[0]
         call_log.append(first_line)
         # Agent writes + commits as part of the task — simulate with a
-        # real git commit so pre/post SHAs differ. The prompt format is
-        # "Create <path>: <intent>", so token[1] carries a trailing colon
-        # we need to strip before using it as a filename.
-        fname = first_line.split()[1].rstrip(":")
+        # real git commit so pre/post SHAs differ. The prompt header
+        # format is "# Task — NEW FILE: <path>" (set by
+        # `_build_task_prompt` for FileOpKind.create), so the path is
+        # the last whitespace-separated token on the header line.
+        fname = first_line.split()[-1]
         target = workspace / fname
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(f"# {first_line}\n", encoding="utf-8")
         await _git(["add", "-A"], workspace)
-        await _git(["commit", "-m", first_line], workspace)
+        # Pass a one-line, ASCII-only commit message — the prompt
+        # header contains an em-dash that some commit hooks reject.
+        await _git(["commit", "-m", f"task: {fname}"], workspace)
         # Task "b" fails validators; everything else is green.
         if "models/b.py" in task_prompt:
             return _fail_result()
@@ -462,3 +465,146 @@ async def test_sqlite_checkpointer_persists_interrupt_across_reopens(
     assert call_count["n"] == 2, (
         f"inner loop should have been called twice (pause + resume), got {call_count['n']}"
     )
+
+
+# ── Idempotency under LangGraph resume replay (7th-regression guard) ──
+#
+# LangGraph's `interrupt()` re-executes the entire node body from the top
+# on resume. Our task_node calls `run_task_with_validators` BEFORE
+# `interrupt()`, so on resume that call is replayed. With a non-
+# deterministic LLM the replay can succeed where it previously raised
+# `HumanReviewRequired` — and the list-append reducer on `completed`
+# would then produce a duplicate TaskOutcome for the same task_id (we
+# saw this during Phase-1 verification: BuildOutcome contained two
+# entries for `backend.task.model`, one with commit_sha and one
+# without). The defensive shield at the top of `task_node` checks
+# `state["completed"]` for an outcome with this task_id and short-
+# circuits to `current_idx + 1` if found.
+#
+# We exercise this directly: build a state where the current task is
+# already in `completed`, invoke the node, and assert (a) it returned a
+# clean advance and (b) the inner loop was never called.
+
+
+async def test_task_node_skips_when_outcome_already_recorded(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`task_node` must short-circuit if `state.completed` already
+    contains an outcome for the current task_id. This is the defensive
+    shield against LangGraph re-executing the node body on resume and
+    accidentally double-running an already-finished task.
+    """
+    from langgraph.runtime import Runtime
+
+    inner_calls: list[str] = []
+
+    async def fake_inner(
+        task_prompt: str,
+        deps: CoderDeps,
+        *,
+        validator_targets: list[str] | None = None,
+        max_attempts: int = 3,
+        agent: Any = None,
+    ) -> ValidatorLoopResult:
+        inner_calls.append(task_prompt)
+        return _ok_result()
+
+    monkeypatch.setattr(graph_mod, "run_task_with_validators", fake_inner)
+
+    plan = _plan(_op("a"), _op("b", depends_on=["a"]))
+    deps = CoderDeps(workspace_root=workspace, project_id="resume-replay")
+
+    # Simulate LangGraph mid-resume: task_order known, current_idx
+    # points at task `a`, AND `a`'s TaskOutcome is already in
+    # completed. This is the exact shape state can take on a re-execute
+    # of a previously-finished node body.
+    state: dict[str, Any] = {
+        "plan": plan.model_dump(),
+        "task_order": ["a", "b"],
+        "current_idx": 0,
+        "completed": [
+            TaskOutcome(
+                task_id="a",
+                ok=True,
+                attempts_used=1,
+                commit_sha="deadbeef",
+                summary="seeded by a previous successful run",
+            )
+        ],
+        "failed": False,
+        "pending_review": None,
+    }
+    runtime: Runtime[graph_mod.BuildContext] = Runtime(
+        context=graph_mod.BuildContext(deps=deps)
+    )
+
+    update = await graph_mod.task_node(state, runtime)  # type: ignore[arg-type]
+
+    # The shield must advance current_idx without invoking the inner
+    # loop and without appending another outcome.
+    assert update["current_idx"] == 1
+    assert update.get("pending_review") is None
+    # No duplicate-outcome append: the partial-state dict must NOT
+    # carry a `completed` key when the shield fires (otherwise the
+    # list-append reducer would duplicate the seeded outcome).
+    assert "completed" not in update
+    # And the inner validator loop never ran for this task.
+    assert inner_calls == []
+
+
+async def test_task_node_skips_when_outcome_recorded_as_dict(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The shield's identity check must work both for `TaskOutcome`
+    objects (the in-memory shape) and for plain dicts (the shape after
+    a SqliteSaver round-trip — the JSON serialiser flattens Pydantic
+    models on read).
+    """
+    from langgraph.runtime import Runtime
+
+    inner_calls: list[str] = []
+
+    async def fake_inner(
+        task_prompt: str,
+        deps: CoderDeps,
+        *,
+        validator_targets: list[str] | None = None,
+        max_attempts: int = 3,
+        agent: Any = None,
+    ) -> ValidatorLoopResult:
+        inner_calls.append(task_prompt)
+        return _ok_result()
+
+    monkeypatch.setattr(graph_mod, "run_task_with_validators", fake_inner)
+
+    plan = _plan(_op("a"), _op("b", depends_on=["a"]))
+    deps = CoderDeps(workspace_root=workspace, project_id="resume-replay-dict")
+
+    # Note: completed is a list-of-dicts, not list-of-TaskOutcome —
+    # mimics what comes back through the checkpointer.
+    state: dict[str, Any] = {
+        "plan": plan.model_dump(),
+        "task_order": ["a", "b"],
+        "current_idx": 0,
+        "completed": [
+            {
+                "task_id": "a",
+                "ok": True,
+                "attempts_used": 1,
+                "commit_sha": "deadbeef",
+                "summary": "seeded as dict",
+                "error": None,
+            }
+        ],
+        "failed": False,
+        "pending_review": None,
+    }
+    runtime: Runtime[graph_mod.BuildContext] = Runtime(
+        context=graph_mod.BuildContext(deps=deps)
+    )
+
+    update = await graph_mod.task_node(state, runtime)  # type: ignore[arg-type]
+
+    assert update["current_idx"] == 1
+    assert "completed" not in update
+    assert inner_calls == []
