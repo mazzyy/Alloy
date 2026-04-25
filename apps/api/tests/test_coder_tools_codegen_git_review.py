@@ -37,7 +37,14 @@ def _deps(workspace: Path) -> CoderDeps:
 
 
 async def _mock_run_command(outcome: CommandResult) -> Any:
-    async def runner(_deps: CoderDeps, binary: str, args: list[str], *, timeout_s: int = 60):
+    # Accept arbitrary keyword args so callers can add `cwd_subdir` etc.
+    # without breaking the mock contract every time.
+    async def runner(
+        _deps: CoderDeps,
+        binary: str,
+        args: list[str],
+        **_kwargs: Any,
+    ):
         return outcome
 
     return runner

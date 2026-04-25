@@ -186,9 +186,16 @@ async def run_command(
     args: list[str] | None = None,
     *,
     timeout_s: int = 60,
+    cwd_subdir: str | None = None,
 ) -> CommandResult:
     """Public async entry point — used both by the agent tool and by
     `validators.py` (which orchestrates several commands in parallel).
+
+    `cwd_subdir` (subprocess fallback only) — relative path under the
+    workspace root that becomes the command's cwd. Needed for things
+    like `python -c "import app.main"` which only resolves when run
+    from `backend/`. In sandbox mode the routing is per-service so this
+    parameter is a no-op there.
     """
     _validate_binary(binary)
     cleaned_args = list(args or [])
@@ -204,8 +211,21 @@ async def run_command(
         return await _run_in_sandbox(
             deps.sandbox, deps.sandbox_handle, binary, cleaned_args, timeout_s=timeout_s
         )
+    cwd = deps.workspace_root
+    if cwd_subdir:
+        candidate = (deps.workspace_root / cwd_subdir).resolve()
+        # Containment check — prevents `..` escapes leaking out of the
+        # project root via this parameter.
+        try:
+            candidate.relative_to(deps.workspace_root.resolve())
+        except ValueError as exc:
+            raise ToolInputError(
+                f"cwd_subdir {cwd_subdir!r} escapes workspace root"
+            ) from exc
+        if candidate.is_dir():
+            cwd = candidate
     return await _run_subprocess(
-        binary, cleaned_args, cwd=deps.workspace_root, timeout_s=timeout_s
+        binary, cleaned_args, cwd=cwd, timeout_s=timeout_s
     )
 
 

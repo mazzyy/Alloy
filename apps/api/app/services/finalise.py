@@ -160,12 +160,21 @@ async def finalise_build(deps: CoderDeps) -> FinaliseReport:
     # 1. alembic upgrade head -------------------------------------------
     if _alembic_present(workspace):
         log.info("finalise.alembic.upgrade_head.start")
+        # Pick the subdir that actually has alembic.ini — generated
+        # projects from full-stack-fastapi-template put it in
+        # `backend/`, our own monorepo would put it in `apps/api/`.
+        alembic_subdir: str | None = None
+        if (workspace / "backend" / "alembic.ini").is_file():
+            alembic_subdir = "backend"
+        elif (workspace / "apps" / "api" / "alembic.ini").is_file():
+            alembic_subdir = "apps/api"
         try:
             cmd = await run_command(
                 deps,
                 "alembic",
                 ["upgrade", "head"],
                 timeout_s=120,
+                cwd_subdir=alembic_subdir,
             )
             step = _step_from_command(name="alembic_upgrade", cmd=cmd)
         except Exception as exc:  # noqa: BLE001 — best-effort

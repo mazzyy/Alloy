@@ -149,7 +149,7 @@ async def run_task_with_validators(
         task_prompt:
             The natural-language task description (from the Planner
             Agent, typically something like "Add a `User` Pydantic model
-            in apps/api/app/models/user.py with id/email/created_at").
+            in backend/app/models/user.py with id/email/created_at").
         deps:
             Coder Agent dependencies — sandbox handle, logger, workspace
             root. The loop does not clone this; every attempt shares the

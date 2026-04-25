@@ -44,7 +44,7 @@ _DESTRUCTIVE_OPS = (
     "op.rename_table",
 )
 
-# Matches `Generating /path/to/apps/api/alembic/versions/<rev>_<slug>.py ... done`
+# Matches `Generating /path/to/backend/app/alembic/versions/<rev>_<slug>.py ... done`
 _ALEMBIC_GENERATED_RE = re.compile(
     r"Generating\s+(?P<path>.+?\.py)\s*(?:\.\.\.|\s*done)?",
     re.IGNORECASE,
@@ -53,34 +53,41 @@ _ALEMBIC_REV_RE = re.compile(r"Generating.*?([a-f0-9]{12})[_.]", re.IGNORECASE)
 
 
 async def _openapi_export(deps: CoderDeps) -> CommandResult:
-    """Runs the project's existing OpenAPI export script.
+    """Export the project's OpenAPI schema to `<workspace>/openapi.json`.
 
-    The scaffold ships `apps/api/scripts/export_openapi.py`. If that
-    script is missing (older scaffolds or test fixtures) we fall back
-    to a one-liner that imports `app.main:app` and writes the schema.
+    The base template (full-stack-fastapi-template) imports `app.main`
+    from inside the `backend/` directory — there's no top-level export
+    script, so we always run the inline one-liner. We pin cwd to
+    `backend/` so the import resolves; in sandbox mode the same routing
+    happens because `python` lands in the backend service container.
     """
-    script_rel = "apps/api/scripts/export_openapi.py"
-    script_path = deps.workspace_root / script_rel
-    if script_path.exists():
-        return await run_command(deps, "python", [script_rel], timeout_s=60)
-    # Fallback: inline the export so the tool still works on minimal
-    # scaffolds that predate the script.
     one_liner = (
-        "import json, sys; "
+        "import json; "
         "from app.main import app; "
-        "open('openapi.json', 'w').write(json.dumps(app.openapi(), indent=2))"
+        "open('../openapi.json', 'w').write(json.dumps(app.openapi(), indent=2))"
     )
-    return await run_command(deps, "python", ["-c", one_liner], timeout_s=60)
+    return await run_command(
+        deps, "python", ["-c", one_liner], timeout_s=60, cwd_subdir="backend"
+    )
 
 
 async def _regenerate_client(deps: CoderDeps) -> CommandResult:
     """Regenerate the frontend TS client from `openapi.json`.
 
-    Runs `npx @hey-api/openapi-ts` via the frontend service — the
-    command is already wired into the scaffold's package.json as
-    `npm run gen:api`, so we call that.
+    The template wires `@hey-api/openapi-ts` into `frontend/package.json`
+    as the `generate-client` script. Running the script directly via
+    `npm run --silent generate-client` from inside `frontend/` matches
+    the template's own `scripts/generate-client.sh` — keeps the
+    invocation hermetic and avoids depending on `bun` (which the
+    template uses but we can't assume is on every dev box).
     """
-    return await run_command(deps, "npm", ["run", "--silent", "gen:api"], timeout_s=120)
+    return await run_command(
+        deps,
+        "npm",
+        ["run", "--silent", "generate-client"],
+        timeout_s=180,
+        cwd_subdir="frontend",
+    )
 
 
 def _scan_destructive(migration_path: Path) -> list[str]:
@@ -104,11 +111,14 @@ async def _alembic_autogenerate(
     if not message or not message.strip():
         raise ToolInputError("migration message must be non-empty")
 
+    # alembic.ini lives in `backend/` — running from the workspace root
+    # gives "Could not find alembic.ini." Pin to backend/.
     cmd = await run_command(
         deps,
         "alembic",
         ["revision", "--autogenerate", "-m", message],
         timeout_s=120,
+        cwd_subdir="backend",
     )
     combined = cmd.stdout + "\n" + cmd.stderr
 
