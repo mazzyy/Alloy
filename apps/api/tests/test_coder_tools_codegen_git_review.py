@@ -309,3 +309,156 @@ async def test_count_changed_on_missing_repo_returns_zero(tmp_path: Path) -> Non
     # No `.git` dir, so `git diff --cached` errors out cleanly.
     count = await git_mod._count_changed(tmp_path)
     assert count == 0
+
+
+# 8th-regression — the agent gamed silent-giveup detection by issuing
+# `git_commit("checkpoint", allow_empty=True)` after a failed apply_patch
+# and writing a >80-char rationalisation summary, which the build's
+# commit_sha-is-not-None heuristic accepted as a real edit. The fix
+# blocks empty commits at the tool boundary by raising `ModelRetry`
+# whenever `allow_empty=True` is passed with zero staged changes. This
+# test asserts the rejection fires and surfaces the corrective nudge.
+
+
+@pytest.mark.skipif(not _have_git(), reason="git binary not on PATH")
+async def test_git_commit_rejects_empty_allow_empty_commit(workspace: Path) -> None:
+    from pydantic_ai import ModelRetry, RunContext
+
+    # Real repo so `git diff --cached` works; no staged changes either,
+    # so files_changed will be 0.
+    subprocess.run(["git", "init"], cwd=workspace, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "symbolic-ref", "HEAD", "refs/heads/main"],
+        cwd=workspace,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=workspace,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=workspace,
+        check=True,
+        capture_output=True,
+    )
+
+    deps = _deps(workspace)
+
+    # We need to invoke the tool's body directly. Use `register` to wire
+    # it onto a stub agent and then poke the registered callable. The
+    # tool body returns a coroutine — capture it via the `@agent.tool`
+    # decorator's call.
+    captured: dict[str, Any] = {}
+
+    class _StubAgent:
+        def tool(self, fn: Any) -> Any:
+            captured["fn"] = fn
+            return fn
+
+    git_mod.register(_StubAgent())  # type: ignore[arg-type]
+    git_commit_fn = captured["fn"]
+
+    # Build a minimal RunContext-like object — only `.deps` is read.
+    class _Ctx:
+        def __init__(self, deps: CoderDeps) -> None:
+            self.deps = deps
+
+    ctx: RunContext[CoderDeps] = _Ctx(deps)  # type: ignore[assignment]
+
+    with pytest.raises(ModelRetry) as excinfo:
+        await git_commit_fn(ctx, "checkpoint", allow_empty=True)
+
+    msg = str(excinfo.value)
+    assert "git_commit refused" in msg
+    assert "allow_empty=True" in msg
+    # The retry prompt must direct the agent to fix the underlying edit
+    # instead of routing around it.
+    assert "apply_patch" in msg or "write_file" in msg
+
+
+# Mako trailing-whitespace fix — the alembic-generated migration ships
+# with W291 trailing whitespace on blank lines (a generic.py.mako
+# artefact). The agent can't fix files alembic owns, so the codegen tool
+# auto-runs `ruff format` + `ruff check --fix --select W291,...` against
+# the new migration immediately. This test asserts those follow-up calls
+# happen and the migration path is added to deps.touched_paths.
+
+
+async def test_alembic_autogenerate_runs_ruff_format_after_generation(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    migration = workspace / "apps/api/alembic/versions/aaaa11112222_add_task.py"
+    migration.parent.mkdir(parents=True, exist_ok=True)
+    migration.write_text(
+        "def upgrade():\n"
+        "    op.create_table('task', ...)\n"  # noqa: E501 — irrelevant
+        "def downgrade():\n"
+        "    pass\n",
+        encoding="utf-8",
+    )
+
+    calls: list[tuple[str, list[str]]] = []
+
+    async def runner(
+        _deps: CoderDeps,
+        binary: str,
+        args: list[str],
+        **_kwargs: Any,
+    ) -> CommandResult:
+        calls.append((binary, args))
+        # Only the alembic call needs the "Generating ..." preamble; the
+        # ruff calls just need to return ok=0.
+        if binary == "alembic":
+            return CommandResult(
+                command="alembic revision ...",
+                returncode=0,
+                stdout=f"Generating {migration} ... done\n",
+                stderr="",
+                duration_s=1.0,
+            )
+        return CommandResult(
+            command=f"{binary} ...",
+            returncode=0,
+            stdout="",
+            stderr="",
+            duration_s=0.1,
+        )
+
+    monkeypatch.setattr(codegen_mod, "run_command", runner)
+
+    deps = _deps(workspace)
+    result = await _alembic_autogenerate(deps, "add task table")
+
+    assert result.ok is True
+    assert result.migration_path is not None
+
+    # Three calls: alembic, ruff format, ruff check --fix --select ...
+    binaries = [b for b, _ in calls]
+    assert binaries[0] == "alembic"
+    assert "ruff" in binaries[1:], (
+        f"expected ruff follow-up calls after alembic, got {binaries!r}"
+    )
+
+    # Find the ruff format call — must target the migration path.
+    ruff_format_calls = [args for b, args in calls if b == "ruff" and args[:1] == ["format"]]
+    assert ruff_format_calls, f"missing `ruff format` call in {calls!r}"
+    assert any(result.migration_path in args for args in ruff_format_calls)
+
+    # Find the ruff check --fix call — must include the W291 selector.
+    ruff_check_calls = [args for b, args in calls if b == "ruff" and "check" in args]
+    assert ruff_check_calls, f"missing `ruff check --fix` call in {calls!r}"
+    fix_args = ruff_check_calls[0]
+    assert "--fix" in fix_args
+    assert "--select" in fix_args
+    selector_idx = fix_args.index("--select")
+    selector = fix_args[selector_idx + 1]
+    assert "W291" in selector
+
+    # The migration path must be added to deps.touched_paths so the
+    # validator scope picks up any genuine alembic problems on the same
+    # turn rather than leaving them to next attempt.
+    assert result.migration_path in deps.touched_paths

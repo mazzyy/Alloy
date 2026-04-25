@@ -676,3 +676,90 @@ def test_agent_error_retry_prompt_generic_branch() -> None:
     # Still no leakage of the repr.
     assert "RuntimeError" not in out
     assert "something else went wrong" not in out
+
+
+# ── Rationalised-giveup detection (8th-regression guard) ──────────────
+#
+# After the silent-giveup byte-floor went in, an agent recovered
+# differently: instead of returning "" or "ok" it wrote a 350-char
+# "I did not modify any app logic; I created a small checkpoint commit
+# so future patches match the tree" summary. That cleared the byte
+# floor (~80 chars) and the loop accepted it as an intentional no-op
+# completion, returning ok=True. The fix is
+# `_looks_like_giveup_rationalisation` which scans the output for
+# admission-of-failure phrases regardless of length.
+
+
+def test_looks_like_giveup_rationalisation_matches_did_not_modify() -> None:
+    # The exact wording from the 7th-regression `backend.task.model`
+    # outcome summary the user reported.
+    fragment = loop_mod._looks_like_giveup_rationalisation(
+        "Thanks — I re-read the repository files to ensure my next "
+        "edits will use up-to-date file contents and created a small "
+        "checkpoint commit so future patches can match the current "
+        "tree exactly. I did not modify any app logic; the commit is "
+        "a checkpoint to avoid the previous \"path does not exist\" "
+        "failure."
+    )
+    assert fragment is not None
+    # The first match wins — both "did not modify" and "checkpoint
+    # commit" appear, so accept either as the trigger.
+    assert fragment in ("did not modify", "checkpoint commit", "no app logic")
+
+
+def test_looks_like_giveup_rationalisation_matches_could_not_apply() -> None:
+    fragment = loop_mod._looks_like_giveup_rationalisation(
+        "After three attempts I could not apply the patch cleanly "
+        "against the existing file contents."
+    )
+    assert fragment == "could not apply"
+
+
+def test_looks_like_giveup_rationalisation_accepts_real_summary() -> None:
+    # A genuine intentional no-op summary should NOT match. This is the
+    # `frontend.routes.register` shape — TanStack Router regenerates
+    # routeTree.gen.ts on its own and the agent rightly does nothing.
+    fragment = loop_mod._looks_like_giveup_rationalisation(
+        "Verified the routeTree.gen.ts file is up to date — TanStack "
+        "Router file-based routing already registered the new page "
+        "automatically when the dev server picked it up. Nothing to "
+        "commit for this task."
+    )
+    assert fragment is None
+
+
+async def test_giveup_rationalisation_fails_on_final_attempt(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When the agent emits a giveup-rationalisation summary on the
+    final attempt, the loop must fail loudly (ok=False) instead of
+    accepting the long-but-content-free summary as a no-op success.
+    """
+
+    async def fake_validators(*_a: Any, **_kw: Any) -> ValidatorReport:
+        return _make_report(ok=True)
+
+    monkeypatch.setattr(loop_mod, "run_validators", fake_validators)
+
+    rationalisation = (
+        "Thanks for the prompt. After multiple attempts I could not "
+        "apply the patch successfully and have created a small "
+        "checkpoint commit so future patches can match the tree "
+        "exactly. I did not modify any app logic on this turn; the "
+        "commit is a marker only."
+    )
+    agent = _scripted_agent([rationalisation])
+    deps = CoderDeps(workspace_root=workspace)
+
+    result = await loop_mod.run_task_with_validators(
+        "append the Task model",
+        deps,
+        max_attempts=1,
+        agent=agent,
+    )
+    assert result.ok is False
+    # The attempt's recorded error must surface the giveup-fragment so
+    # the outer loop's failure summary is informative.
+    err = result.attempts[-1].agent_error or ""
+    assert "giveup" in err
+    assert "fragment" in err

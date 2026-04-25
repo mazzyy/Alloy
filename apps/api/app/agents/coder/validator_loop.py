@@ -72,6 +72,56 @@ _TOP_K_ISSUES = 20
 _MIN_NO_WRITE_OUTPUT_CHARS = 80
 
 
+# Phrases that signal the agent is rationalising a giveup as success.
+# Hit during Phase-1 verification: an agent's `apply_patch` calls all
+# failed, the agent then wrote a 350-char "I did not modify any app
+# logic; I created a small checkpoint commit so future patches match
+# the tree" summary, and the validator loop accepted it as an
+# intentional no-op (because output_stripped >= 80 chars). The tell is
+# always some combination of:
+#   * an admission of non-action ("did not modify", "no changes made"),
+#   * a "checkpoint commit" / "marker commit" alibi for the empty
+#     touched_paths set,
+#   * an apply_patch failure mention without a corresponding success.
+#
+# Match is case-insensitive substring. Curated from real failure traces
+# during the 7th-regression verification — every fragment showed up as
+# the agent claiming success after producing zero actual edits.
+_GIVEUP_RATIONALISATION_FRAGMENTS: tuple[str, ...] = (
+    "did not modify",
+    "didn't modify",
+    "no app logic",
+    "checkpoint commit",
+    "checkpoint to avoid",
+    "marker commit",
+    "i did not change",
+    "i didn't change",
+    "no actual changes",
+    "no changes were made",
+    "no edits were made",
+    "not modify any",
+    "not change any",
+    "could not apply",
+    "failed to apply",
+    "patch could not",
+    "without modifying",
+)
+
+
+def _looks_like_giveup_rationalisation(output: str) -> str | None:
+    """Return the first matching giveup-fragment, or None.
+
+    Case-insensitive substring match. Used to override the "intentional
+    no-op completion" branch when the agent's summary is actually a
+    rationalisation of a failed turn.
+    """
+    lowered = output.lower()
+    for fragment in _GIVEUP_RATIONALISATION_FRAGMENTS:
+        if fragment in lowered:
+            return fragment
+    return None
+
+
 # Retry prompt for the "agent produced no writes and no summary" case.
 # Deliberately concrete: tell the agent *what to do next* rather than
 # just "try again". Most silent-giveup cases are an agent that hit one
@@ -370,15 +420,26 @@ async def run_task_with_validators(
                 commands=[],
             )
             output_stripped = (output or "").strip()
-            silent_giveup = len(output_stripped) < _MIN_NO_WRITE_OUTPUT_CHARS
+            short_output = len(output_stripped) < _MIN_NO_WRITE_OUTPUT_CHARS
+            rationalisation = _looks_like_giveup_rationalisation(output_stripped)
+            silent_giveup = short_output or rationalisation is not None
+            giveup_reason = (
+                "silent giveup (no writes, no summary)"
+                if short_output
+                else (
+                    f"giveup rationalised as success "
+                    f"(matched fragment {rationalisation!r})"
+                    if rationalisation is not None
+                    else None
+                )
+            )
             attempts.append(
                 ValidatorLoopAttempt(
                     attempt=attempt_idx,
                     agent_output=output,
                     agent_turn_count=turn_count,
                     report=empty_report,
-                    agent_error=("silent giveup (no writes, no summary)"
-                                 if silent_giveup else None),
+                    agent_error=giveup_reason,
                 )
             )
             if not silent_giveup:
@@ -402,6 +463,7 @@ async def run_task_with_validators(
                 attempt=attempt_idx,
                 turn_count=turn_count,
                 output_chars=len(output_stripped),
+                rationalisation=rationalisation,
             )
             if attempt_idx >= max_attempts:
                 # Out of attempts. Surface as a failure so the outer
@@ -414,9 +476,40 @@ async def run_task_with_validators(
                     attempts=attempts,
                     final_report=empty_report,
                 )
-            current_prompt = _NO_WRITE_RETRY_PROMPT.format(
-                attempt=attempt_idx + 1, max_attempts=max_attempts
-            )
+            # Pick the right retry nudge: a short / empty output gets the
+            # generic no-writes prompt; a rationalisation needs an extra
+            # line calling out the specific evasion so the agent doesn't
+            # repeat it on the next turn.
+            if rationalisation is not None:
+                current_prompt = (
+                    f"Attempt {attempt_idx + 1}/{max_attempts} — your "
+                    f"previous turn produced ZERO file edits but your "
+                    f"summary claimed success (matched the giveup "
+                    f"phrase {rationalisation!r}).\n"
+                    "\n"
+                    "A `git_commit` with `allow_empty=True` and no "
+                    "actual file writes is NOT task completion. Empty "
+                    "checkpoint commits do not satisfy a build task — "
+                    "the validator suite needs the intended edits to "
+                    "exist before it has anything to check.\n"
+                    "\n"
+                    "Recover step by step:\n"
+                    "  1. `read_file` the target so you can see the "
+                    "actual current contents.\n"
+                    "  2. If `apply_patch` failed because the file "
+                    "doesn't exist, switch to `write_file`.\n"
+                    "  3. If `apply_patch` failed on context anchors, "
+                    "re-emit with verbatim context lines from the read.\n"
+                    "  4. Verify your `apply_patch` / `write_file` "
+                    "tool result has `ok=True` BEFORE calling "
+                    "`git_commit`.\n"
+                    "  5. Do NOT call `git_commit(allow_empty=True)` "
+                    "to dodge this requirement."
+                )
+            else:
+                current_prompt = _NO_WRITE_RETRY_PROMPT.format(
+                    attempt=attempt_idx + 1, max_attempts=max_attempts
+                )
             continue
 
         scope_paths = sorted(deps.touched_paths)

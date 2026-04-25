@@ -15,7 +15,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from pydantic_ai import RunContext
+from pydantic_ai import ModelRetry, RunContext
 
 from app.agents.coder.context import CoderDeps
 from app.agents.coder.errors import ToolInputError
@@ -65,6 +65,35 @@ def register(agent: Agent[CoderDeps, str]) -> None:
         # Stage first so we can count what's actually about to land.
         await _git(["add", "-A"], root)
         files_changed = await _count_changed(root)
+
+        # Block the "empty checkpoint commit to fake task completion"
+        # pattern. During Phase-1 verification we saw the agent recover
+        # from a failed `apply_patch` by issuing
+        # `git_commit("checkpoint", allow_empty=True)` and then claim
+        # the task was complete in its summary. The build's
+        # commit_sha-is-not-None heuristic accepted that as a real edit.
+        # Empty commits are NEVER a valid completion of a BuildPlan
+        # task — if there are no staged changes there is nothing for
+        # the validator suite to check. Surface this as a ModelRetry so
+        # the agent gets the diagnostic on the same turn instead of
+        # poisoning the validator-loop's silent-giveup branch.
+        if files_changed == 0 and allow_empty:
+            ctx.deps.bind(
+                tool="git_commit",
+                rejected="empty_commit",
+                touched_paths=sorted(ctx.deps.touched_paths),
+            ).warning("coder.git_commit.rejected_empty")
+            raise ModelRetry(
+                "git_commit refused: an `allow_empty=True` commit with "
+                "zero staged changes is not a valid task completion. "
+                "If your earlier `apply_patch` / `write_file` failed, "
+                "fix that — re-read the file with `read_file`, then "
+                "retry with verbatim context, or switch to `write_file` "
+                "if the file does not yet exist. If you genuinely "
+                "believe the current code already satisfies the task, "
+                "say so explicitly in your final reply (one sentence) "
+                "and do NOT call `git_commit` — return without it."
+            )
 
         try:
             sha = await commit_all(root, message, allow_empty=allow_empty)

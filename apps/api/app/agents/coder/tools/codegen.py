@@ -145,6 +145,34 @@ async def _alembic_autogenerate(
         abs_mig = deps.workspace_root / migration_path
         if abs_mig.exists():
             destructive = _scan_destructive(abs_mig)
+            # Alembic's templated output ships with trailing whitespace
+            # on blank lines (a Mako template artefact — see
+            # alembic/templates/generic/script.py.mako). That trips
+            # `ruff` with W291 the moment the validator loop runs,
+            # which the agent CANNOT fix without hand-editing a file
+            # alembic owns. Fix it at the source: run `ruff format`
+            # against the generated migration immediately. We also tag
+            # it as a touched path so the validator scope picks up any
+            # *real* issues alembic may have produced (E402, etc.) on
+            # the very same turn rather than next attempt.
+            #
+            # We deliberately ignore ruff's exit code here — if ruff
+            # itself isn't installed in the sandbox the agent's later
+            # validator run will surface that, and we don't want a
+            # missing formatter to mask a genuine alembic failure.
+            await run_command(
+                deps,
+                "ruff",
+                ["format", migration_path],
+                timeout_s=30,
+            )
+            await run_command(
+                deps,
+                "ruff",
+                ["check", "--fix", "--select", "W291,W292,W293,I", migration_path],
+                timeout_s=30,
+            )
+            deps.touched_paths.add(migration_path)
 
     return AlembicResult(
         revision=revision,
