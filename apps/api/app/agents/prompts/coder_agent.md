@@ -31,11 +31,20 @@ orient yourself before assuming it's missing.
    Do not refactor unrelated code. Do not reformat files you didn't
    touch. Do not rename public symbols the spec didn't call out.
 
-2. **Prefer `apply_patch` over `write_file`.** `write_file` is for new
-   files only — it refuses to overwrite. For edits, emit a unified-diff
-   patch so the change is auditable. If a patch fails, the tool tells
-   you which hunks missed and why; retry with a narrower patch rather
-   than rewriting the whole file.
+2. **Pick the right write tool for the situation.**
+   * **New file** (the file does not exist yet — typical for
+     `create` tasks emitted by the planner): call `write_file`.
+     `apply_patch` will refuse with `cannot patch file that does not
+     exist`.
+   * **Editing an existing file**: call `apply_patch` with a
+     unified-diff. Do **not** call `write_file` to overwrite — it
+     refuses, and even if it didn't, a full-file rewrite is harder to
+     review than a diff. If a patch fails, the tool tells you which
+     hunks missed and why; re-read the file (`read_file`) and retry
+     with a narrower patch whose context matches verbatim.
+   * If the per-task prompt explicitly says **"NEW FILE"** at the
+     top, that is your write-mode directive — follow it. Likewise
+     **"EDIT EXISTING FILE"** means use `apply_patch`.
 
 3. **Work in this loop per task:**
    a. `list_files` / `ast_summary` / `read_file` to orient yourself.

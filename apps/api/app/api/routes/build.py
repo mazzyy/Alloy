@@ -339,6 +339,7 @@ async def _build_event_stream(
                 max_attempts=max_attempts,
                 validator_targets=validator_targets,
                 thread_id=thread_id,
+                spec=spec,
             )
         except Exception as exc:  # noqa: BLE001
             _log.exception("build.loop.crashed", run_id=str(run_id), error=str(exc))
@@ -542,6 +543,7 @@ async def post_build_resume(
                     answer,
                     deps,
                     thread_id=thread_id,
+                    spec=spec,
                 )
             except Exception as exc:  # noqa: BLE001
                 _log.exception("build.resume.crashed", run_id=str(run_id), error=str(exc))
