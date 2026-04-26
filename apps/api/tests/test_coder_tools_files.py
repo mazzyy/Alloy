@@ -126,9 +126,45 @@ def test_write_file_creates_parent_dirs(workspace: Path) -> None:
     assert (workspace / "apps/api/app/sub/dir/file.py").exists()
 
 
-def test_write_file_refuses_overwrite(workspace: Path) -> None:
+def test_write_file_refuses_overwrite_by_default(workspace: Path) -> None:
     with pytest.raises(ToolInputError, match="apply_patch"):
         _write_file(workspace, "apps/api/app/main.py", "# rewritten\n")
+
+
+def test_write_file_overwrite_replaces_existing(workspace: Path) -> None:
+    """11th-regression guard: `overwrite=True` is the deliberate
+    fallback the agent must reach for when `apply_patch` is stuck on a
+    small file. Failure mode without this flag was the agent escalating
+    via `request_human_review` asking the user to choose between
+    "use write_file" and "give me hunk lines" — pure giveup. The flag
+    has to actually replace the file, set `created=False` so callers
+    can audit overwrites, and not fail on existing parent dirs.
+    """
+    target = workspace / "apps/api/app/main.py"
+    original = target.read_text()
+    new_contents = "# fully rewritten via overwrite=True\nx = 1\n"
+
+    result = _write_file(
+        workspace, "apps/api/app/main.py", new_contents, overwrite=True
+    )
+
+    assert result.created is False
+    assert result.bytes_written == len(new_contents.encode("utf-8"))
+    assert target.read_text() == new_contents
+    assert target.read_text() != original
+
+
+def test_write_file_overwrite_still_creates_when_missing(workspace: Path) -> None:
+    """`overwrite=True` should be a superset of the create path — it
+    must still create files that don't yet exist (with `created=True`),
+    so callers don't have to branch on file existence before deciding
+    whether to pass the flag.
+    """
+    result = _write_file(
+        workspace, "apps/api/app/brand_new.py", "y = 2\n", overwrite=True
+    )
+    assert result.created is True
+    assert (workspace / "apps/api/app/brand_new.py").read_text() == "y = 2\n"
 
 
 def test_write_file_rejects_empty_path(workspace: Path) -> None:

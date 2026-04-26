@@ -176,20 +176,31 @@ def _read_file(
     )
 
 
-def _write_file(root: Path, rel: str, content: str) -> WriteResult:
+def _write_file(
+    root: Path, rel: str, content: str, *, overwrite: bool = False
+) -> WriteResult:
     if not rel or not rel.strip():
         raise ToolInputError("path must not be empty")
     path = resolve_inside(root, rel)
-    if path.exists():
-        # Explicit: write_file is create-only. Edits must go through
-        # apply_patch so diffs stay auditable.
+    pre_existing = path.exists()
+    if pre_existing and not overwrite:
+        # Default mode: write_file is create-only so the agent doesn't
+        # accidentally clobber existing code when it meant to patch.
+        # Overwrite is opt-in via the `overwrite=True` flag, used as a
+        # deliberate fallback when `apply_patch` is stuck on small files
+        # — see the system prompt's "Pick the right write tool" rule.
         raise ToolInputError(
-            f"file already exists: {rel!r}; use apply_patch to edit existing files"
+            f"file already exists: {rel!r}; pass overwrite=True to "
+            "replace it (or call apply_patch for an auditable diff)"
         )
     path.parent.mkdir(parents=True, exist_ok=True)
     data = content.encode("utf-8")
     path.write_bytes(data)
-    return WriteResult(path=rel_to(root, path), bytes_written=len(data), created=True)
+    return WriteResult(
+        path=rel_to(root, path),
+        bytes_written=len(data),
+        created=not pre_existing,
+    )
 
 
 def register(agent: Agent[CoderDeps, str]) -> None:
@@ -232,14 +243,41 @@ def register(agent: Agent[CoderDeps, str]) -> None:
         ctx: RunContext[CoderDeps],
         path: str,
         content: str,
+        overwrite: bool = False,
     ) -> WriteResult:
-        """Create a new file at `path` with `content`.
+        """Create or overwrite a file at `path` with `content`.
 
-        Refuses to overwrite existing files — use `apply_patch` to edit.
-        Creates parent directories as needed.
+        Default (`overwrite=False`): create-only. Refuses if the file
+        already exists — that prevents accidental clobbers when you
+        meant to call `apply_patch`. Creates parent dirs as needed.
+
+        Pass `overwrite=True` only when you have *deliberately* chosen
+        to replace the file's full contents. The two situations where
+        this is correct:
+
+        * `apply_patch` has failed twice on the same target with
+          context-mismatch / "no hunks found" errors and the file is
+          small enough that re-emitting it in full is cleaner than
+          fighting hunk anchors. Always `read_file` first so the
+          contents you write include everything that must stay.
+        * The task explicitly says to replace a generated/scaffold
+          file with a different version (e.g. swapping a stub).
+
+        Do not use `overwrite=True` to dodge a one-off context
+        mismatch — re-read + retry is still the first fallback. The
+        `WriteResult.created` flag tells you whether you replaced an
+        existing file (False) or created a new one (True), so callers
+        — and the validator loop — can audit overwrites if needed.
         """
-        ctx.deps.bind(tool="write_file", path=path, bytes=len(content)).debug("coder.tool")
-        result = _write_file(ctx.deps.workspace_root, path, content)
+        ctx.deps.bind(
+            tool="write_file",
+            path=path,
+            bytes=len(content),
+            overwrite=overwrite,
+        ).debug("coder.tool")
+        result = _write_file(
+            ctx.deps.workspace_root, path, content, overwrite=overwrite
+        )
         # Record the write so the validator loop can scope lint/type
         # checks to files we actually touched this turn.
         ctx.deps.touched_paths.add(result.path)

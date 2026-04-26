@@ -93,6 +93,56 @@ _GENERIC_QUESTION_FRAGMENTS: tuple[str, ...] = (
     # Agent leaking pydantic-ai internals into its question
     "unexpectedmodelbehavior",
     "exceeded maximum retries",
+    # 11th-regression family — the agent escalates a *patch mechanic*
+    # question that it should answer itself by calling write_file.
+    # Surfaced on `backend.todo.migration`, question excerpt:
+    #   "apply_patch keeps failing with 'no hunks found' — my patches
+    #    are very small edits but the tool won't accept them. ...
+    #    Options: 1) Allow me to overwrite the file with write_file
+    #            2) Advise a specific exact hunk lines"
+    # The right answer is option 1, which the agent already has — its
+    # tool schema includes `write_file` and the system prompt says to
+    # use it as a fallback. Asking the human to pick is a no-op
+    # escalation; reject so the agent commits to write_file itself.
+    "apply_patch keeps failing",
+    "apply_patch will not accept",
+    "apply_patch won't accept",
+    "patch won't accept",
+    "no hunks found",
+    "tool won't accept them",
+    "tool will not accept them",
+    "allow me to overwrite",
+    "may i use write_file",
+    "may i overwrite",
+    "should i use write_file",
+    "should i overwrite the file",
+    "advise a specific exact hunk",
+    "advise the exact hunk",
+    "advise the hunk",
+    "provide the exact lines",
+    "provide the exact hunk",
+    # 12th-regression family — the agent escalates an alembic /
+    # tooling diagnostic question framed as A/B options when the real
+    # answer is "read the stderr you already have". Surfaced on
+    # `backend.todo.migration`, question excerpt:
+    #   "alembic_autogenerate returned ok=false and produced no
+    #    migration file ... I can proceed with two options: (A) update
+    #    env.py ... or (B) you can allow me to run alembic directly in
+    #    verbose mode to get more diagnostic output."
+    # The right answer is to read `result.stderr` — which the tool
+    # now surfaces — not to guess at env.py imports or ask for a
+    # bash escape hatch. Reject so the agent is forced to use the
+    # diagnostic info it already has.
+    "fails silently",
+    "fail silently",
+    "ok=false and produced no",
+    "returned ok=false and",
+    "run alembic directly in verbose",
+    "alembic in verbose mode",
+    "allow me to run alembic",
+    "more diagnostic output",
+    "more diagnostic info",
+    "to get diagnostics",
 )
 
 
@@ -165,11 +215,28 @@ def register(agent: Agent[CoderDeps, str]) -> None:
             raise ModelRetry(
                 f"request_human_review rejected: {rejection}\n"
                 f"Your question was: {question!r}\n\n"
-                "If you escalated because `apply_patch` failed with a "
-                "context mismatch, do NOT escalate — call `read_file` on "
-                "the target, look at the actual contents, and re-emit "
-                "the patch with verbatim context. Most patch failures are "
-                "stale anchors, not real ambiguities."
+                "If you escalated because `apply_patch` failed (context "
+                "mismatch, no hunks found, the tool 'won't accept' your "
+                "patch, etc.), do NOT escalate. You have two equivalent "
+                "fallbacks and you must pick one yourself:\n"
+                "  (a) `read_file` the target, then re-emit `apply_patch` "
+                "with verbatim context lines.\n"
+                "  (b) `write_file(..., overwrite=True)` with the full "
+                "intended file contents — this is always allowed and is "
+                "the correct fallback when your patch body is small or "
+                "the anchors are short. Read the file first so you don't "
+                "clobber unrelated existing code.\n"
+                "Pick whichever lands the change fastest. Asking the "
+                "human to choose between (a) and (b) is itself a giveup.\n"
+                "\n"
+                "If you escalated because `alembic_autogenerate` "
+                "returned `ok=false` and you don't know why: the tool "
+                "result already contains `stderr` and `returncode` "
+                "fields. Read `result.stderr` — alembic prints almost "
+                "every error there (config issues, missing tables, "
+                "import failures). Do NOT ask the human for a 'verbose "
+                "mode' or guess at env.py imports; the diagnostic you "
+                "need is already in your tool result."
             )
 
         opts = list(options or [])

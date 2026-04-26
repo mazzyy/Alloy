@@ -120,6 +120,54 @@ async def test_alembic_autogenerate_with_no_destructive_ops(
     assert result.ok is True
 
 
+async def test_alembic_autogenerate_failure_surfaces_stderr_and_returncode(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """12th-regression guard: when alembic fails (non-zero exit), the
+    AlembicResult must surface `stderr` and `returncode` so the agent
+    has a real diagnostic to act on.
+
+    Pre-fix the result only had `stdout`. Alembic prints almost
+    everything to stderr (config errors, missing tables, import
+    failures), so a failed autogenerate left the agent looking at
+    `ok=False` with empty stdout and nothing else — which led to the
+    `backend.todo.migration` escalation where it fabricated theories
+    about env.py imports and asked the user to choose between
+    "update env.py" and "run alembic in verbose mode" instead of just
+    reading the actual error.
+    """
+    monkeypatch.setattr(
+        codegen_mod,
+        "run_command",
+        await _mock_run_command(
+            CommandResult(
+                command="alembic revision ...",
+                returncode=2,
+                stdout="",
+                stderr=(
+                    "FAILED: Target database is not up to date.\n"
+                    "ERROR [alembic.util.messaging] Target database is "
+                    "not up to date.\n"
+                ),
+                duration_s=0.4,
+            )
+        ),
+    )
+
+    result = await _alembic_autogenerate(_deps(workspace), "add todo")
+
+    assert result.ok is False
+    # The agent needs both fields to diagnose: stderr has the human-
+    # readable cause, returncode lets it pattern-match common
+    # exit-code shapes.
+    assert result.returncode == 2
+    assert "Target database is not up to date" in result.stderr
+    # Sanity: when alembic failed we should not have synthesised a
+    # migration_path or revision out of thin air.
+    assert result.migration_path is None
+    assert result.revision is None
+
+
 # ── request_human_review ───────────────────────────────────────────────
 
 
@@ -249,6 +297,102 @@ def test_looks_generic_rejects_i_need_clarification() -> None:
     assert reason is not None
     assert "generic placeholder" in reason
     assert "i need clarification" in reason
+
+
+def test_looks_generic_rejects_apply_patch_mechanic_question() -> None:
+    """11th-regression guard: the agent escalates a *patch mechanic*
+    question that it must answer itself by using `write_file(..., overwrite=True)`.
+
+    Real failure question from `backend.todo.migration`:
+
+        "I'm trying to modify backend/app/crud.py but apply_patch keeps
+         failing with 'no hunks found' — my patches are very small
+         edits but the tool won't accept them. I re-read the file and
+         tried several verbatim context attempts. Options:
+           1) Allow me to overwrite the file with write_file (I will
+              emit the full updated file contents).
+           2) Advise a specific exact hunk to change (provide the exact
+              lines to replace) so I can craft a matching apply_patch.
+         Which should I do?"
+
+    The right answer is option 1, which the agent already has access
+    to via `write_file(..., overwrite=True)`. Asking the human to
+    pick is a no-op escalation — reject so the agent commits.
+    """
+    from app.agents.coder.tools.review import _looks_generic
+
+    question = (
+        "I'm trying to modify backend/app/crud.py but apply_patch keeps "
+        "failing with 'no hunks found' — my patches are very small "
+        "edits but the tool won't accept them. I re-read the file and "
+        "tried several verbatim context attempts. Options: 1) Allow me "
+        "to overwrite the file with write_file 2) Advise a specific "
+        "exact hunk to change. Which should I do?"
+    )
+    reason = _looks_generic(question)
+    assert reason is not None, (
+        "the apply_patch-mechanic escalation must be rejected — the "
+        "agent has `write_file(overwrite=True)` and must pick that "
+        "fallback itself rather than pausing the build."
+    )
+    assert "generic placeholder" in reason
+
+
+def test_looks_generic_rejects_no_hunks_found_escalation() -> None:
+    """A leaner phrasing of the same evasion — the agent reports "no
+    hunks found" and asks whether to use write_file. Same answer:
+    pick write_file yourself.
+    """
+    from app.agents.coder.tools.review import _looks_generic
+
+    question = (
+        "apply_patch returned 'no hunks found' on every attempt. "
+        "Should I overwrite the file using write_file instead, or "
+        "would you rather provide the exact lines I should target?"
+    )
+    reason = _looks_generic(question)
+    assert reason is not None
+
+
+def test_looks_generic_rejects_alembic_diagnostic_escalation() -> None:
+    """12th-regression guard: the agent escalates an alembic
+    diagnostic question framed as A/B options when the right answer
+    is "read the stderr you already have".
+
+    Real failure question from `backend.todo.migration`:
+
+        "I attempted alembic_autogenerate("add todo") but it returned
+         ok=false and produced no migration file. I retried multiple
+         times; the autogenerate tool still fails silently. ... I can
+         proceed with two options: (A) I can update env.py to import
+         the package as `from backend.app.models import SQLModel` and
+         then re-run alembic_autogenerate, or (B) you can allow me to
+         run alembic directly in verbose mode to get more diagnostic
+         output. Which should I do?"
+
+    The right answer is "neither — read `result.stderr`". The
+    AlembicResult now surfaces stderr + returncode (12th-regression
+    fix), and the rejection nudge tells the agent so. Reject the
+    question so the agent's next turn re-reads its own tool result.
+    """
+    from app.agents.coder.tools.review import _looks_generic
+
+    question = (
+        "I attempted alembic_autogenerate(\"add todo\") but it "
+        "returned ok=false and produced no migration file. I retried "
+        "multiple times; the autogenerate tool still fails silently. "
+        "I inspected backend/app/models.py (I already added the Todo "
+        "model) and backend/app/alembic/env.py. I can proceed with "
+        "two options: (A) update env.py to use backend.app.models, "
+        "or (B) allow me to run alembic directly in verbose mode to "
+        "get more diagnostic output. Which should I do?"
+    )
+    reason = _looks_generic(question)
+    assert reason is not None, (
+        "the alembic-diagnostic escalation must be rejected — the "
+        "agent has stderr + returncode in its tool result and must "
+        "read those instead of asking the human."
+    )
 
 
 # ── git_commit ─────────────────────────────────────────────────────────

@@ -790,6 +790,91 @@ def test_looks_like_giveup_rationalisation_does_not_match_neutral_tell() -> None
     assert fragment is None
 
 
+def test_looks_like_giveup_rationalisation_matches_dont_know_which_file() -> None:
+    """11th-regression guard (A): the agent admits it doesn't know
+    which file to patch and asks the user to specify. Real failure
+    summary from `backend.todo.model`:
+
+        "I don't yet know which file you want me to patch. Please tell
+         me the exact path of the file I should read/modify (for
+         example: backend/app/models.py) and what change you want
+         applied. Once you provide the target path I'll read the
+         current file contents and produce a tight apply_patch as
+         described."
+
+    Existing fragments missed this entirely — none of them keyed on
+    "don't know which file" or "tell me the exact path". The validator
+    loop returned ok=true with attempts_used=2 because the summary was
+    long, on-topic, and superficially reasonable.
+    """
+    summary = (
+        "I don't yet know which file you want me to patch. Please tell "
+        "me the exact path of the file I should read/modify (for "
+        "example: backend/app/models.py) and what change you want "
+        "applied. Once you provide the target path I'll read the "
+        "current file contents and produce a tight apply_patch as "
+        "described."
+    )
+    fragment = loop_mod._looks_like_giveup_rationalisation(summary)
+    assert fragment is not None, (
+        "the 'don't know which file / tell me the exact path' evasion "
+        "must be caught — without this fragment, the loop accepts a "
+        "clarifying-question summary as task completion."
+    )
+
+
+def test_looks_like_giveup_rationalisation_matches_failed_to_land() -> None:
+    """11th-regression guard (B): the agent admits in plain English
+    that its patches did not land but still summarises the turn. Real
+    failure summary from `backend.todo.crud`:
+
+        "I attempted to edit backend/app/models.py to add a bio field
+         to the User model but my apply_patch calls failed to land due
+         to hunk mismatches. I re-read the file multiple times to
+         ensure correct context and attempted the patch again; it
+         still failed. No file changes were made, and the commit
+         attempt found nothing to commit. I will need to retry with a
+         correctly formatted patch hunk that matches the file's exact
+         content before committing."
+
+    Existing fragments missed this because the agent wrote "No file
+    changes were made" — the extra word "file" broke the substring
+    match against the existing "no changes were made" fragment. Add
+    variants that match the real shape of the admission.
+    """
+    summary = (
+        "I attempted to edit backend/app/models.py to add a bio field "
+        "to the User model but my apply_patch calls failed to land due "
+        "to hunk mismatches. I re-read the file multiple times to "
+        "ensure correct context and attempted the patch again; it "
+        "still failed. No file changes were made, and the commit "
+        "attempt found nothing to commit. I will need to retry with a "
+        "correctly formatted patch hunk that matches the file's exact "
+        "content before committing."
+    )
+    fragment = loop_mod._looks_like_giveup_rationalisation(summary)
+    assert fragment is not None, (
+        "the 'patches failed to land / no file changes / will need to "
+        "retry' admission must be caught — without it, the loop "
+        "treats an explicit failure narration as task completion."
+    )
+
+
+def test_looks_like_giveup_rationalisation_does_not_match_clean_summary() -> None:
+    """Sanity: after adding the new failure-admission fragments, an
+    actual clean success summary must still not trip the detector. The
+    fragments target evasion shapes; a real edit summary mentions
+    files/changes positively.
+    """
+    summary = (
+        "Added the bio: str | None = Field(default=None) field to the "
+        "UserBase class in backend/app/models.py. Updated UserCreate, "
+        "UserUpdate, and UserPublic to include the same field. Ran "
+        "ruff and mypy — clean. Committed as a14b2c."
+    )
+    assert loop_mod._looks_like_giveup_rationalisation(summary) is None
+
+
 async def test_giveup_rationalisation_fails_on_final_attempt(
     workspace: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

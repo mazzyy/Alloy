@@ -167,6 +167,15 @@ class AlembicResult(BaseModel):
     found in the migration. The Coder Agent MUST call
     `request_human_review` before applying a migration whose
     `destructive_ops` is non-empty.
+
+    `stdout`, `stderr`, and `returncode` mirror the underlying alembic
+    invocation so the agent has a real diagnostic to read on failure.
+    Pre-12th-regression we only surfaced `stdout`, which meant a
+    failed autogenerate (returncode != 0) gave the agent no error
+    message — alembic prints almost everything to stderr — and the
+    agent fabricated theories about the cause (e.g. claiming env.py's
+    `from app.models import SQLModel` import was wrong when it
+    wasn't). Always include both streams.
     """
 
     revision: str | None
@@ -174,6 +183,8 @@ class AlembicResult(BaseModel):
     migration_path: str | None
     destructive_ops: list[str] = Field(default_factory=list)
     stdout: str
+    stderr: str = ""
+    returncode: int = 0
     ok: bool
 
 

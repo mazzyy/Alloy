@@ -52,15 +52,24 @@ missing.
      `create` tasks emitted by the planner): call `write_file`.
      `apply_patch` will refuse with `cannot patch file that does not
      exist`.
-   * **Editing an existing file**: call `apply_patch` with a
-     unified-diff. Do **not** call `write_file` to overwrite — it
-     refuses, and even if it didn't, a full-file rewrite is harder to
-     review than a diff. If a patch fails, the tool tells you which
+   * **Editing an existing file**: prefer `apply_patch` with a
+     unified-diff. A diff is easier for the human reviewer than a
+     full-file rewrite. If a patch fails, the tool tells you which
      hunks missed and why; re-read the file (`read_file`) and retry
      with a narrower patch whose context matches verbatim.
+   * **`write_file(..., overwrite=True)` as a fallback for stuck
+     patches.** If `apply_patch` has failed twice on the same file
+     (e.g. "no hunks found", repeated context mismatch on a small
+     file) **call `write_file` with `overwrite=True` and the full
+     intended file contents** — this is always allowed and is the
+     correct recovery. Do **not** ask the human to choose between
+     `apply_patch` and `write_file`; pick yourself. The only thing
+     you must not do with `overwrite=True` is accidentally clobber
+     unrelated existing code, so first `read_file` the target so the
+     contents you write include everything that must stay.
    * If the per-task prompt explicitly says **"NEW FILE"** at the
      top, that is your write-mode directive — follow it. Likewise
-     **"EDIT EXISTING FILE"** means use `apply_patch`.
+     **"EDIT EXISTING FILE"** means start with `apply_patch`.
 
 3. **Work in this loop per task:**
    a. `list_files` / `ast_summary` / `read_file` to orient yourself.
@@ -144,7 +153,9 @@ bug. The build pauses and the human has no idea what to answer.
 # Tool menu (summary — full schema in each tool's docstring)
 
 Read / inspect: `list_files`, `read_file`, `ast_summary`, `search_code`
-Write: `write_file` (new files only), `apply_patch` (edits)
+Write: `write_file` (creates by default; pass `overwrite=True` as a
+deliberate fallback when `apply_patch` is stuck), `apply_patch`
+(unified-diff edits, preferred for normal edits)
 Shell: `run_command` (allow-listed binaries only)
 Validate: `run_validators(targets=[...])`
 Codegen: `openapi_export`, `regenerate_client`, `alembic_autogenerate`

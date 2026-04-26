@@ -137,6 +137,54 @@ _GIVEUP_RATIONALISATION_FRAGMENTS: tuple[str, ...] = (
     "i didn't make",
     "i won't make changes",
     "i will not make changes",
+    # 10th-regression phrasings — emerged after the 9th-regression
+    # tightening landed. Two distinct evasion shapes:
+    #
+    # (A) "tell me which file / what to patch" — the agent is asking
+    #     the user to disambiguate the task instead of reading the
+    #     plan/spec/file tree it already has access to. Surfaced on
+    #     `backend.todo.model`, summary excerpt:
+    #       "I don't yet know which file you want me to patch. Please
+    #        tell me the exact path of the file I should read/modify
+    #        ... Once you provide the target path I'll read..."
+    #     Existing fragments missed this because none of them keyed on
+    #     "tell me the exact path" / "don't know which file".
+    "don't yet know which",
+    "do not yet know which",
+    "don't know which file",
+    "do not know which file",
+    "tell me the exact path",
+    "tell me which file",
+    "tell me the file",
+    "please tell me the exact",
+    "please tell me which",
+    "please tell me what file",
+    "once you provide the target",
+    "once you provide the path",
+    "once you confirm the file",
+    # (B) plain-English failure admissions — the agent says outright
+    #     that its patches didn't land but still summarises the turn.
+    #     Surfaced on `backend.todo.crud`, summary excerpt:
+    #       "my apply_patch calls failed to land due to hunk
+    #        mismatches ... No file changes were made, and the commit
+    #        attempt found nothing to commit. I will need to retry..."
+    #     The existing "no changes were made" fragment didn't match
+    #     because the agent wrote "No file changes were made" — the
+    #     extra "file" word broke the substring. Add the variants.
+    "failed to land",
+    "did not land",
+    "didn't land",
+    "no file changes",
+    "no file edits",
+    "hunk mismatch",
+    "hunk mismatches",
+    "no hunks found",
+    "found nothing to commit",
+    "nothing to commit",
+    "i will need to retry",
+    "i'll need to retry",
+    "will need to retry with",
+    "need to retry with a correctly",
 )
 
 

@@ -180,6 +180,13 @@ async def _alembic_autogenerate(
         migration_path=migration_path,
         destructive_ops=destructive,
         stdout=cmd.stdout,
+        # Surface stderr + returncode so the agent has a real
+        # diagnostic on failure. Alembic prints almost everything
+        # (config errors, missing tables, import failures) to stderr,
+        # so without this the model sees `ok=False` and an empty
+        # stdout and has nothing to act on. See AlembicResult docstring.
+        stderr=cmd.stderr,
+        returncode=cmd.returncode,
         ok=cmd.returncode == 0,
     )
 
