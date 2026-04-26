@@ -11,11 +11,14 @@ reports) already lives on the sandbox filesystem + git log by the time
 the final string is produced, so we don't also try to return it in
 typed form.
 
-`retries=1` because pydantic-ai's built-in retry is for schema
-validation of tool args — it's separate from our own retry budget for
-validator-loop failures (`CoderDeps.retry_budget`). One schema retry
-is plenty; anything more means the LLM is genuinely confused and
-should get a fresh turn instead.
+`retries=6` is pydantic-ai's per-tool retry budget — separate from
+our own retry budget for validator-loop failures
+(`CoderDeps.retry_budget`). It catches transient tool-arg schema
+problems and `apply_patch` stale-context misses where the next
+ModelRetry payload (which embeds a file excerpt) is enough for the
+model to recover. See the inline comment on the `retries=` argument
+in `build_coder_agent` for the full history of why this number is
+six and not one or three.
 """
 
 from __future__ import annotations
@@ -49,18 +52,32 @@ def build_coder_agent() -> Agent[CoderDeps, str]:
         # us under the 128K output cap while leaving headroom for
         # reasoning tokens.
         model_settings=default_settings(reasoning_effort="low", max_output_tokens=8000),
-        # `retries=3` is pydantic-ai's per-tool retry budget (separate
-        # from our validator-loop retry budget). We bumped from 1 → 3
-        # after an Azure run where the model emitted a malformed
-        # apply_patch call, got the ModelRetry hint, emitted *another*
-        # malformed call with path="" (different bug, also retry-able),
-        # and then pydantic-ai gave up with UnexpectedModelBehavior —
-        # consuming an entire validator-loop attempt. Three per-turn
-        # retries is enough for the model to try a write_file fallback,
-        # re-read the file, or correct path-arg mistakes before we bail
-        # the whole attempt. Still small enough that a truly stuck agent
-        # (wrong mental model of a file) surfaces quickly.
-        retries=3,
+        # `retries=6` is pydantic-ai's per-tool retry budget (separate
+        # from our validator-loop retry budget).
+        #
+        # History:
+        #   1 → 3: Azure run where the model emitted a malformed
+        #     apply_patch, got the ModelRetry hint, emitted *another*
+        #     malformed call with path="", then pydantic-ai gave up
+        #     with UnexpectedModelBehavior, consuming an entire
+        #     validator-loop attempt.
+        #   3 → 6: `backend.note.model` task on the
+        #     fastapi-fullstack-template scaffold. The agent kept
+        #     calling apply_patch with stale @@ context (the file
+        #     already contained scaffold User/Item classes the agent
+        #     hadn't read yet). Each retry embedded a file excerpt in
+        #     the ModelRetry payload, but it took the model 3+ tries
+        #     to align its context with the actual contents — at which
+        #     point pydantic-ai had already exhausted the budget and
+        #     surfaced UnexpectedModelBehavior, blowing the whole
+        #     validator-loop attempt despite the model being on track.
+        #
+        # Six is still well under "infinite retry" — a truly stuck
+        # agent (wrong mental model of a file, incorrect target path)
+        # surfaces inside ~30s — but gives the model real headroom to
+        # converge on stale-context cases that have a deterministic fix
+        # (re-read + verbatim re-paste).
+        retries=6,
         name="alloy.coder_agent",
     )
     register_tools(agent)

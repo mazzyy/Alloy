@@ -609,6 +609,16 @@ async def test_silent_giveup_retries_with_nudge(
     # The retry prompt for attempt 2 must mention the no-write nudge.
     assert "no edits and no summary" in seen_prompts[1]
     assert "read_file" in seen_prompts[1]
+    # 10th-regression guard: the retry prompt must explicitly forbid
+    # prose-only responses. The failure mode it defends against is the
+    # Note-model trace where, after rationalisation was caught, the
+    # agent's recovery turn was *another* prose summary instead of a
+    # tool call — exhausting the validator-loop budget and leaving
+    # pydantic-ai's per-turn `retries` count to absorb the eventual
+    # apply_patch attempts (which then failed on stale context). The
+    # cure is to tell the model unambiguously that its next response
+    # must START with a tool call.
+    assert "MUST start with a tool call" in seen_prompts[1]
 
 
 # ── Sanitised agent-crash retry prompt (7th-regression guard) ─────────
@@ -901,3 +911,67 @@ async def test_giveup_rationalisation_retries_when_attempts_remain(
     assert "giveup" in (result.attempts[0].agent_error or "")
     # Second attempt: clean summary, no giveup.
     assert result.attempts[1].agent_error is None
+
+
+async def test_giveup_rationalisation_retry_prompt_forbids_prose(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """10th-regression guard: when the loop catches a rationalisation
+    and retries, the retry prompt MUST explicitly forbid a prose-only
+    response and demand the next message start with a tool call.
+
+    The production failure this defends against: the `backend.note.model`
+    trace where rationalisation was caught on attempt 1, the agent
+    *narrated* its recovery on attempt 2 (instead of calling tools),
+    and pydantic-ai's per-turn `retries` budget absorbed the eventual
+    apply_patch attempts which all failed on stale context. The whole
+    validator-loop attempt died with `UnexpectedModelBehavior("Tool
+    'apply_patch' exceeded max retries count of 3")`. Telling the
+    model unambiguously to issue a tool call next turn shrinks the
+    surface area for that prose-recovery dead-end.
+    """
+
+    seen_prompts: list[str] = []
+
+    async def fake_validators(*_a: Any, **_kw: Any) -> ValidatorReport:
+        return _make_report(ok=True)
+
+    monkeypatch.setattr(loop_mod, "run_validators", fake_validators)
+
+    real_run_once = loop_mod._run_agent_once
+
+    async def spy_run_once(agent: Any, prompt: str, deps: CoderDeps, hist: Any) -> Any:
+        seen_prompts.append(prompt)
+        return await real_run_once(agent, prompt, deps, hist)
+
+    monkeypatch.setattr(loop_mod, "_run_agent_once", spy_run_once)
+
+    agent = _scripted_agent(
+        [
+            "I did not modify any files — the model already exists.",
+            "Appended the Task model with id, title, status. Committed.",
+        ]
+    )
+    deps = CoderDeps(workspace_root=workspace)
+    _mark_written(deps)
+
+    result = await loop_mod.run_task_with_validators(
+        "append the Task model",
+        deps,
+        max_attempts=2,
+        agent=agent,
+    )
+
+    assert result.ok is True
+    assert len(seen_prompts) == 2
+    retry_prompt = seen_prompts[1]
+    # The retry prompt must surface the rationalisation-specific framing…
+    assert "ZERO file edits" in retry_prompt
+    assert "claimed success" in retry_prompt
+    # …and explicitly forbid a prose-only response on the next turn.
+    assert "MUST start with a tool call" in retry_prompt
+    # Must enumerate the right tool sequence so the model knows what
+    # the recovery shape looks like.
+    assert "read_file" in retry_prompt
+    assert "apply_patch" in retry_prompt
+    assert "git_commit" in retry_prompt

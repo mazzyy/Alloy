@@ -157,3 +157,48 @@ async def test_coder_agent_surfaces_patch_failure_to_model(workspace: Path) -> N
 
     # File was NOT modified — failed patches are atomic.
     assert "FastAPI()" in (workspace / "apps/api/app/main.py").read_text()
+
+
+def test_build_coder_agent_pins_retry_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pin pydantic-ai's per-call `retries` budget on the production
+    agent at 6.
+
+    The 10th-regression failure (`backend.note.model` task) exhausted
+    pydantic-ai's per-tool retry count after the model needed several
+    `apply_patch` attempts to align its @@ context with the actual
+    file contents. Each ModelRetry payload embeds a file excerpt, so
+    convergence is normally fast, but three retries was tight enough
+    that a single early misstep blew the whole turn. We bumped to six.
+
+    A silent regression back to 1 or 3 reintroduces the same crash on
+    any task that touches a non-trivial scaffolded file. Pin it.
+    """
+    # `build_coder_agent` calls `get_planner_model()` which raises
+    # AgentModelConfigError if Azure isn't configured. Stub the relevant
+    # settings so the call lands without needing real creds — the model
+    # is never invoked here, only its construction.
+    from app.agents.coder.agent import build_coder_agent
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "AZURE_OPENAI_ENDPOINT", "https://stub.test/")
+    monkeypatch.setattr(settings, "AZURE_OPENAI_API_KEY", "stub")
+    monkeypatch.setattr(settings, "AZURE_OPENAI_DEPLOYMENT", "stub-deployment")
+    # The lru_cache holds onto the first instance built across tests;
+    # bust it so we get a fresh one with the patched settings.
+    build_coder_agent.cache_clear()
+    try:
+        agent = build_coder_agent()
+        # `_max_tool_retries` is pydantic-ai's internal name for the
+        # ctor `retries=` argument. If pydantic-ai renames this in a
+        # future release, this test will tell us in CI before a release
+        # silently lands a regression.
+        assert agent._max_tool_retries == 6, (
+            "Coder Agent retry budget regressed — see "
+            "`build_coder_agent` in agent.py for why this must stay at "
+            "6 and the history of how we got here."
+        )
+    finally:
+        # Don't leak the stubbed agent into other tests' caches.
+        build_coder_agent.cache_clear()
