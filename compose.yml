@@ -45,8 +45,10 @@ services:
 
   api:
     build:
-      context: ./apps/api
-      dockerfile: Dockerfile
+      # Monorepo root so `packages/shared/python` (the alloy-shared workspace
+      # dep) is reachable. The Dockerfile expects this layout.
+      context: .
+      dockerfile: apps/api/Dockerfile
     # Dev override: hot-reload uvicorn instead of prod Gunicorn.
     command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
     env_file: [.env]
@@ -57,8 +59,10 @@ services:
       REDIS_URL: redis://redis:6379/0
       FRONTEND_HOST: http://localhost:5173
     volumes:
-      - ./apps/api/app:/app/app:ro
-      - ./apps/api/alembic:/app/alembic:ro
+      # WORKDIR inside the runtime image is /srv/apps/api (see Dockerfile).
+      - ./apps/api/app:/srv/apps/api/app:ro
+      - ./apps/api/alembic:/srv/apps/api/alembic:ro
+      - ./packages/shared/python:/srv/packages/shared/python:ro
     depends_on:
       db: { condition: service_healthy }
       redis: { condition: service_healthy }
@@ -79,8 +83,8 @@ services:
 
   worker:
     build:
-      context: ./apps/api
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: apps/api/Dockerfile
     command: ["arq", "app.workers.arq_worker.WorkerSettings"]
     env_file: [.env]
     environment:
@@ -89,33 +93,47 @@ services:
       POSTGRES_PORT: 5432
       REDIS_URL: redis://redis:6379/0
     volumes:
-      - ./apps/api/app:/app/app:ro
+      - ./apps/api/app:/srv/apps/api/app:ro
+      - ./packages/shared/python:/srv/packages/shared/python:ro
     depends_on:
       redis: { condition: service_healthy }
       db: { condition: service_healthy }
 
   web:
     build:
-      context: ./apps/web
-      dockerfile: Dockerfile
+      # Monorepo root so `packages/shared/ts` (the @alloy/shared workspace
+      # dep) and pnpm-workspace.yaml are reachable. The Dockerfile expects
+      # this layout.
+      context: .
+      dockerfile: apps/web/Dockerfile
+      target: builder
     # Dev: run Vite inside the container so hot reload works out of the box.
-    # Override target stage to the builder, which has pnpm + node available.
-    command: ["pnpm", "dev", "--host", "0.0.0.0"]
+    # The `--filter web` is needed because there are multiple workspace
+    # packages and pnpm needs to know which one to run dev for.
+    command: ["pnpm", "--filter", "web", "dev", "--host", "0.0.0.0"]
+    working_dir: /repo
     environment:
       VITE_API_URL: http://api:8000
       VITE_CLERK_PUBLISHABLE_KEY: ${VITE_CLERK_PUBLISHABLE_KEY:-}
     volumes:
-      - ./apps/web:/app
-      - web-node-modules:/app/node_modules
+      # Bind-mount source + workspace dep so hot-reload picks up edits.
+      - ./apps/web:/repo/apps/web
+      - ./packages/shared/ts:/repo/packages/shared/ts
+      # Anonymous volumes pin the in-image node_modules so the host's
+      # node_modules (likely macOS-resolved) doesn't shadow the container's
+      # Linux-resolved one. Same trick as before, just retargeted.
+      - web-node-modules:/repo/apps/web/node_modules
+      - web-root-node-modules:/repo/node_modules
     ports:
       - "5173:5173"
     depends_on:
       api: { condition: service_started }
     # Note: the builder stage (Node + pnpm + source) is targeted via
-    # compose.override.yml so `pnpm dev` works with hot reload. The nginx
-    # runtime stage is for prod images only.
+    # `target: builder` above so `pnpm dev` works with hot reload. The
+    # nginx runtime stage is for prod images only.
 
 volumes:
   alloy-db-data: {}
   alloy-redis-data: {}
   web-node-modules: {}
+  web-root-node-modules: {}

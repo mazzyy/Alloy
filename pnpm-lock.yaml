@@ -17,6 +17,9 @@ importers:
 
   apps/web:
     dependencies:
+      '@alloy/shared':
+        specifier: workspace:*
+        version: link:../../packages/shared/ts
       '@clerk/clerk-react':
         specifier: ^5.22.0
         version: 5.61.3(react-dom@19.2.5(react@19.2.5))(react@19.2.5)
@@ -123,6 +126,8 @@ importers:
       vitest:
         specifier: ^2.1.8
         version: 2.1.9(@types/node@22.19.17)(jsdom@25.0.1)(lightningcss@1.32.0)
+
+  packages/shared/ts: {}
 
 packages:
 

@@ -45,6 +45,37 @@ exclude = ["venv", ".venv", "alembic"]
 # a specific dep can override with a `[[tool.mypy.overrides]]` entry.
 ignore_missing_imports = true
 
+# 13th-regression overrides — disable a small set of known-spurious
+# diagnostics on TEMPLATE-OWNED files only. The agent should never be
+# editing these files, so loosening type-checking here cannot mask a
+# real bug introduced by the agent.
+#
+# (a) `app/core/security.py` (upstream full-stack-fastapi-template):
+#     uses `from pwdlib import PasswordHash`. pwdlib publishes
+#     `PasswordHash` at the top level via a runtime re-export mypy
+#     cannot statically follow — it's defined in an internal module
+#     and re-exported in `pwdlib/__init__.py` without an explicit
+#     `from .X import Y` line. mypy emits `attr-defined`. Same shape
+#     for `pwdlib.hashers.{argon2,bcrypt}` submodule imports.
+#
+# (b) `app/core/clerk.py` (auth/clerk block): calls
+#     `jwt.decode(..., options=options)` where `options` is a plain
+#     `dict[str, Any]`. pyjwt 2.10+'s stubs type the parameter as a
+#     `jwt.api_jwt.Options` TypedDict, so mypy emits `arg-type`. The
+#     code is correct at runtime — pyjwt accepts a plain dict — and
+#     this is the integration shape Clerk's own docs publish.
+#
+# Per-file overrides target the specific template files; the agent's
+# own edits in `app/api/`, `app/models.py`, `app/crud.py`, etc. still
+# get full strict-mode treatment.
+[[tool.mypy.overrides]]
+module = ["app.core.security"]
+disable_error_code = ["attr-defined"]
+
+[[tool.mypy.overrides]]
+module = ["app.core.clerk"]
+disable_error_code = ["arg-type"]
+
 [tool.ruff]
 target-version = "py310"
 exclude = ["alembic"]

@@ -1,3 +1,6 @@
 packages:
   - "apps/web"
-  - "packages/*"
+  # Match packages/<group>/<name>/package.json — `@alloy/shared` lives at
+  # packages/shared/ts/. Sibling python package has no package.json so pnpm
+  # safely ignores it.
+  - "packages/*/*"

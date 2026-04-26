@@ -1,0 +1,52 @@
+# Root .dockerignore — applies to all Docker builds whose context is the
+# monorepo root (currently: apps/api, worker, and apps/web).
+#
+# Keep this list tight: per-image excludes are layered on by the per-app
+# Dockerfile via COPY discipline (we explicitly COPY apps/<x> + packages/shared/<y>).
+# The job here is to drop bloat that would otherwise balloon the build context.
+
+# Python build / cache cruft
+__pycache__
+*.pyc
+*.pyo
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.coverage
+htmlcov
+coverage.xml
+
+# Virtualenvs (we install fresh inside the image via uv)
+.venv
+venv
+
+# Node / pnpm
+node_modules
+.pnpm-store
+.next
+.turbo
+dist
+build
+
+# Local env / secrets
+.env
+.env.*
+!.env.example
+
+# VCS + editor + OS junk
+.git
+.gitignore
+.idea
+.vscode
+.DS_Store
+
+# Docs / markdown — never needed in image
+*.md
+
+# Workspaces dir for scaffolded user projects (live on host volume)
+.alloy
+~/.alloy
+
+# Tests aren't shipped in the runtime image (we still need them at build
+# time for some projects, but the api Dockerfile doesn't COPY them).
+apps/api/tests

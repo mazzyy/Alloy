@@ -14,7 +14,7 @@
  *   - A simple CSS design system for immediate visual polish
  */
 
-import type { AppSpec, Entity, Page } from "@alloy/shared";
+import type { AppSpec, Entity, EntityField, Page } from "@alloy/shared";
 
 export interface SandpackFiles {
   [path: string]: string;
@@ -40,7 +40,7 @@ function pluralize(entity: Entity): string {
 function generateFixture(entity: Entity, count = 3): string {
   const rows: string[] = [];
   for (let i = 1; i <= count; i++) {
-    const fields = entity.fields.map((f) => {
+    const fields = entity.fields.map((f: EntityField) => {
       let value: string;
       switch (f.type) {
         case "string":
@@ -85,7 +85,7 @@ function generatePageComponent(page: Page, entities: Entity[]): string {
   // Find entities this page depends on via data_deps
   const usedEntities = entities.filter((e) =>
     page.data_deps.some(
-      (dep) =>
+      (dep: string) =>
         dep.toLowerCase().includes(e.name.toLowerCase()) ||
         dep.toLowerCase().includes(pluralize(e).toLowerCase()),
     ),
@@ -106,7 +106,7 @@ function generatePageComponent(page: Page, entities: Entity[]): string {
         <div className="card-grid">
           {${varName}Data.map((item, i) => (
             <div key={i} className="card">
-${displayFields.map((f) => `              <div className="field"><span className="label">${capitalize(f.name)}</span><span className="value">{String(item.${camelCase(f.name)})}</span></div>`).join("\n")}
+${displayFields.map((f: EntityField) => `              <div className="field"><span className="label">${capitalize(f.name)}</span><span className="value">{String(item.${camelCase(f.name)})}</span></div>`).join("\n")}
             </div>
           ))}
         </div>
@@ -148,7 +148,7 @@ export function generateSandpackFiles(spec: AppSpec): SandpackFiles {
 
   // ── Nav component ──────────────────────────────────────────
   const navLinks = spec.pages
-    .map((p) => `      <a href="${p.path}" className={location.pathname === "${p.path}" ? "active" : ""}>${p.name}</a>`)
+    .map((p: Page) => `      <a href="${p.path}" className={location.pathname === "${p.path}" ? "active" : ""}>${p.name}</a>`)
     .join("\n");
 
   files["/components/Nav.jsx"] = `export default function Nav() {
@@ -166,14 +166,14 @@ ${navLinks}
 
   // ── App.jsx with routing ───────────────────────────────────
   const pageImports = spec.pages
-    .map((p) => {
+    .map((p: Page) => {
       const name = capitalize(camelCase(p.name));
       return `import ${name}Page from "./pages/${name}Page";`;
     })
     .join("\n");
 
   const routes = spec.pages
-    .map((p) => {
+    .map((p: Page) => {
       const name = capitalize(camelCase(p.name));
       return `        <Route path="${p.path}" element={<${name}Page />} />`;
     })
