@@ -44,8 +44,10 @@ See `roadmap.txt` for the full 18-week plan.
 graph TB
     subgraph Frontend["React IDE Shell (Vite + TS + Tailwind + shadcn)"]
         UI[Dashboard + Build Page]
-        Monaco["Monaco Editor (Phase 2)"]
-        Preview["Live Preview (Phase 2)"]
+        Monaco[Monaco Editor + Tabs]
+        FileTree[File Tree Panel]
+        Preview["Preview (Sandpack lite + Daytona full)"]
+        Chat[Chat / Build Stream Panel]
     end
 
     subgraph Gateway["FastAPI Gateway (async, uvicorn)"]
@@ -57,7 +59,20 @@ graph TB
     subgraph Agents["Pydantic AI Agents"]
         SpecAgent[Spec Agent]
         PlannerAgent[Planner Agent]
-        CoderAgent["Coder Agent (Phase 2)"]
+        CoderAgent[Coder Agent]
+    end
+
+    subgraph BuildLoop["LangGraph Build Loop"]
+        Scaffolder[Deterministic Scaffolder]
+        Graph[Build Graph — init → task loop → END]
+        Validators[Validator Loop — ruff + mypy + pytest + tsc + eslint + vitest]
+        Finalise[Post-build Finalise — alembic + openapi + ts-client + smoke]
+    end
+
+    subgraph Sandbox["Per-project Sandbox"]
+        SbxMgr[LocalSandboxManager]
+        Compose["Docker Compose (per project)"]
+        GitRepo[Project Git Repo]
     end
 
     subgraph Infra["Infrastructure"]
@@ -75,7 +90,13 @@ graph TB
 
     UI -->|HTTPS + SSE| Gateway
     Gateway --> Agents
+    Gateway --> BuildLoop
     Agents --> LiteLLM
+    CoderAgent --> Validators
+    BuildLoop --> Sandbox
+    Scaffolder --> GitRepo
+    Graph --> CoderAgent
+    Graph --> Finalise
     LiteLLM --> AzureA
     LiteLLM --> AzureB
     LiteLLM --> OpenAI
@@ -86,11 +107,67 @@ graph TB
     style Frontend fill:#1e293b,stroke:#3b82f6,color:#e2e8f0
     style Gateway fill:#1e293b,stroke:#22c55e,color:#e2e8f0
     style Agents fill:#1e293b,stroke:#a855f7,color:#e2e8f0
+    style BuildLoop fill:#1e293b,stroke:#ec4899,color:#e2e8f0
+    style Sandbox fill:#1e293b,stroke:#14b8a6,color:#e2e8f0
     style Infra fill:#1e293b,stroke:#f59e0b,color:#e2e8f0
     style LLMProviders fill:#1e293b,stroke:#ef4444,color:#e2e8f0
 ```
 
-### Code generation pipeline (Phase 1)
+### Full build loop (`POST /build/run`)
+
+```mermaid
+sequenceDiagram
+    actor User
+    participant IDE as IDE Shell
+    participant API as FastAPI
+    participant Scaffold as Scaffolder
+    participant Sandbox as SandboxManager
+    participant Graph as LangGraph
+    participant Coder as Coder Agent
+    participant Val as Validator Loop
+    participant Fin as Finalise
+
+    User->>IDE: Clicks "Run Build"
+    IDE->>API: POST /build/run (SSE)
+    API->>Sandbox: create(spec, blocks)
+    Sandbox->>Scaffold: scaffold_project()
+    Note over Scaffold: Copier base template<br/>+ block overlays<br/>+ anchor patches<br/>+ git init
+    Scaffold-->>Sandbox: ScaffoldReport
+    Sandbox-->>API: SandboxInfo
+    API-->>IDE: SSE: phase=scaffolded
+
+    API->>Graph: ainvoke(plan, context)
+    Note over Graph: init_node:<br/>topological_order(plan.ops)
+
+    loop For each task in DAG order
+        Graph->>Coder: run_task_with_validators(prompt)
+        Coder->>Coder: write_file / apply_patch / run_command
+        Coder->>Val: run validators (ruff, mypy, pytest, tsc, eslint, vitest)
+        alt Validators pass
+            Val-->>Graph: ok=true
+            Graph->>Graph: git_commit(task.intent)
+        else Validators fail (≤3 retries)
+            Val-->>Coder: top-N diagnostics fed back
+            Coder->>Coder: fix attempt
+        else Human review needed
+            Graph->>Graph: interrupt()
+            Graph-->>API: pending_review
+            API-->>IDE: SSE: phase=needs_review
+            User->>IDE: Answers question
+            IDE->>API: POST /build/resume
+        end
+        Graph-->>API: TaskOutcome
+        API-->>IDE: SSE: phase=task_finished
+    end
+
+    API->>Fin: finalise_build(deps)
+    Note over Fin: 1. alembic upgrade head<br/>2. openapi.json export<br/>3. @hey-api/openapi-ts regen<br/>4. playwright @smoke
+    Fin-->>API: FinaliseReport
+    API-->>IDE: SSE: phase=finalise_finished
+    API-->>IDE: SSE: event=result (BuildOutcome)
+```
+
+### Spec → Plan pipeline
 
 ```mermaid
 sequenceDiagram
@@ -125,6 +202,22 @@ sequenceDiagram
     API-->>UI: SSE status events + result
 
     Note over UI: Renders plan as<br/>grouped FileOp list
+```
+
+### Sandbox lifecycle
+
+```mermaid
+stateDiagram-v2
+    [*] --> CREATED: create()
+    CREATED --> BOOTING: boot()
+    BOOTING --> RUNNING: compose up ok
+    BOOTING --> FAILED: compose up error
+    RUNNING --> ARCHIVED: archive() / idle timeout
+    ARCHIVED --> BOOTING: resume()
+    FAILED --> BOOTING: resume()
+    RUNNING --> DESTROYED: destroy()
+    ARCHIVED --> DESTROYED: destroy()
+    DESTROYED --> [*]
 ```
 
 ### LLM routing & fallback cascade
@@ -168,18 +261,43 @@ alloy/
 │   │   │   │   ├── models.py             # Azure OpenAI ↔ Pydantic AI model factory
 │   │   │   │   ├── spec_agent.py         # Spec Agent: prompt → AppSpec
 │   │   │   │   ├── planner_agent.py      # Planner Agent: AppSpec → BuildPlan
-│   │   │   │   └── prompts/
-│   │   │   │       ├── spec_agent.md     # System prompt for spec extraction
-│   │   │   │       └── planner_agent.md  # System prompt for plan generation
+│   │   │   │   ├── prompts/
+│   │   │   │   │   ├── spec_agent.md     # System prompt for spec extraction
+│   │   │   │   │   └── planner_agent.md  # System prompt for plan generation
+│   │   │   │   ├── coder/                # Coder Agent — turns BuildPlan into files
+│   │   │   │   │   ├── agent.py          # Pydantic AI agent definition + tool registration
+│   │   │   │   │   ├── context.py        # CoderDeps: workspace root, touched_paths, logger
+│   │   │   │   │   ├── errors.py         # HumanReviewRequired exception
+│   │   │   │   │   ├── results.py        # TaskResult, AttemptRecord, CommandResult
+│   │   │   │   │   ├── validator_loop.py # run_task_with_validators(): agent → validate → retry
+│   │   │   │   │   └── tools/            # Claude Code–style tool schema
+│   │   │   │   │       ├── files.py      # list_files, read_file, write_file
+│   │   │   │   │       ├── patch.py      # apply_patch (unified diff)
+│   │   │   │   │       ├── commands.py   # run_command (allow-listed: alembic, pytest, ruff, …)
+│   │   │   │   │       ├── search.py     # search_code, ast_summary
+│   │   │   │   │       ├── codegen.py    # openapi_export, regenerate_client, alembic_autogenerate
+│   │   │   │   │       ├── validators.py # run_validators (ruff + mypy + pytest + tsc + eslint + vitest)
+│   │   │   │   │       ├── git.py        # git_commit
+│   │   │   │   │       └── review.py     # request_human_review → interrupt()
+│   │   │   │   └── build/                # LangGraph outer build loop
+│   │   │   │       ├── graph.py          # StateGraph: init_node → task_node loop → END
+│   │   │   │       ├── state.py          # BuildState, TaskOutcome, HumanReviewPayload
+│   │   │   │       ├── topo.py           # topological_order(plan) — DAG sort
+│   │   │   │       ├── runner.py         # run_build(): high-level orchestrator
+│   │   │   │       └── checkpointer.py   # LangGraph checkpoint saver adapter
 │   │   │   ├── api/
-│   │   │   │   ├── router.py             # Top-level router (health, ping, generate, spec, plan)
+│   │   │   │   ├── router.py             # Top-level router mounting
 │   │   │   │   ├── deps.py               # Clerk JWT + DB session dependencies
 │   │   │   │   └── routes/
 │   │   │   │       ├── health.py         # GET /health, GET /ready
 │   │   │   │       ├── ping.py           # GET /ping (auth smoke test)
 │   │   │   │       ├── generate.py       # POST /generate/echo (LLM streaming smoke)
 │   │   │   │       ├── spec.py           # POST /spec/propose, POST /spec/save, GET /spec/{id}
-│   │   │   │       └── plan.py           # POST /plan/build, GET /plan/{id}
+│   │   │   │       ├── plan.py           # POST /plan/build, GET /plan/{id}
+│   │   │   │       ├── build.py          # POST /build/run, POST /build/resume, GET /build/runs
+│   │   │   │       ├── files.py          # GET /files/tree, GET /files/read
+│   │   │   │       ├── sandbox.py        # GET+POST /sandbox/state, /sandbox/start, /sandbox/stop
+│   │   │   │       └── projects.py       # Project CRUD routes
 │   │   │   ├── core/
 │   │   │   │   ├── config.py             # Pydantic Settings (all env vars)
 │   │   │   │   ├── db.py                 # Async SQLAlchemy session factory
@@ -188,14 +306,26 @@ alloy/
 │   │   │   │   └── logging.py            # structlog configuration
 │   │   │   ├── models/
 │   │   │   │   └── project.py            # Project, AppSpecVersion, BuildPlanVersion (SQLModel)
+│   │   │   ├── scaffold/                 # Deterministic scaffolder (no LLM)
+│   │   │   │   ├── scaffolder.py         # scaffold_project(): Copier + blocks + git init
+│   │   │   │   ├── blocks.py             # Block, BlockCatalogue, load_catalogue()
+│   │   │   │   └── answer_builder.py     # build_answers(): spec → Copier template vars
+│   │   │   ├── sandboxes/                # Per-project workspace manager
+│   │   │   │   ├── manager.py            # LocalSandboxManager: create/boot/archive/resume/destroy
+│   │   │   │   ├── compose.py            # render_alloy_compose(): per-project compose.yml
+│   │   │   │   ├── ports.py              # ProbingPortAllocator: host port allocation
+│   │   │   │   ├── git_ops.py            # head_sha, commit_all, reset_hard, ensure_repo
+│   │   │   │   ├── runtime.py            # DockerComposeRuntime: up/down/exec abstraction
+│   │   │   │   ├── dependency.py         # FastAPI dependency injection for sandbox manager
+│   │   │   │   └── types.py              # SandboxHandle, SandboxInfo, SandboxStatus, SandboxError
 │   │   │   ├── services/
-│   │   │   │   └── projects.py           # CRUD: create project, save spec/plan versions
+│   │   │   │   ├── projects.py           # CRUD: create project, save spec/plan versions
+│   │   │   │   ├── builds.py             # Build run persistence + history queries
+│   │   │   │   ├── workspaces.py         # ensure_workspace_for_build, archive_sandbox_safely
+│   │   │   │   └── finalise.py           # finalise_build(): alembic + openapi + ts-client + smoke
 │   │   │   └── workers/
 │   │   │       └── arq_worker.py         # Arq background worker (placeholder tasks)
-│   │   ├── tests/
-│   │   │   ├── test_health.py            # Health + readiness endpoint tests
-│   │   │   ├── test_spec_agent.py        # Spec Agent unit tests (TestModel)
-│   │   │   └── test_planner_agent.py     # Planner Agent unit tests (TestModel)
+│   │   ├── tests/                        # 22 test files — see "Tests" section below
 │   │   ├── pyproject.toml                # Python deps (FastAPI, Pydantic AI, LiteLLM, etc.)
 │   │   └── uv.lock
 │   │
@@ -216,18 +346,33 @@ alloy/
 │           ├── auth/
 │           │   ├── AuthProvider.tsx       # Clerk / dev-bootstrap auth provider
 │           │   └── identity.ts           # useIdentity() hook
-│           ├── components/ui/
-│           │   ├── button.tsx            # shadcn Button
-│           │   └── card.tsx              # shadcn Card
+│           ├── components/
+│           │   ├── ui/
+│           │   │   ├── button.tsx         # shadcn Button
+│           │   │   ├── card.tsx           # shadcn Card
+│           │   │   └── tooltip.tsx        # shadcn Tooltip
+│           │   └── ide/                  # IDE shell components
+│           │       ├── IDELayout.tsx      # Three-pane layout: file tree + editor + chat + preview
+│           │       ├── ChatPanel.tsx      # Chat / build stream panel + review UI
+│           │       ├── EditorPanel.tsx    # Monaco editor with tabs
+│           │       ├── FileTree.tsx       # File tree sidebar
+│           │       └── PreviewPanel.tsx   # Sandpack lite + Daytona full preview toggle
+│           ├── hooks/
+│           │   ├── useBuildStream.ts      # Build lifecycle state machine (idle→spec→plan→build→done)
+│           │   ├── useFileTree.ts         # File tree fetching + expansion state
+│           │   ├── useEditorTabs.ts       # Tab management for Monaco
+│           │   └── useSandboxPreview.ts   # Sandbox status polling + preview URL
 │           ├── lib/
-│           │   ├── api.ts               # Fetch wrapper with SSE streaming + structured streamJson
-│           │   └── cn.ts                 # clsx + tailwind-merge
+│           │   ├── api.ts                # Fetch wrapper with SSE streaming + structured streamJson
+│           │   ├── cn.ts                  # clsx + tailwind-merge
+│           │   ├── hey-api.ts            # @hey-api/openapi-ts generated client wrapper
+│           │   └── sandpack-gen.ts        # Sandpack file generation from workspace
 │           ├── pages/
-│           │   ├── Dashboard.tsx         # Ping card + Azure OpenAI echo card
-│           │   ├── Build.tsx             # Prompt → Spec → Plan wizard (Phase 1 UI)
-│           │   └── SignIn.tsx            # Clerk sign-in page
+│           │   ├── Dashboard.tsx          # Ping card + Azure OpenAI echo card
+│           │   ├── Build.tsx              # IDE shell wrapper (routes to IDELayout)
+│           │   └── SignIn.tsx             # Clerk sign-in page
 │           └── test/
-│               └── ...                  # Vitest test files
+│               └── ...                   # Vitest test files
 │
 ├── packages/
 │   └── shared/                           # AppSpec + BuildPlan schemas (Python ↔ TS mirror)
@@ -241,6 +386,14 @@ alloy/
 │               ├── index.ts
 │               ├── spec.ts              # TypeScript AppSpec types
 │               └── plan.ts              # TypeScript BuildPlan types
+│
+├── blocks/                               # Composable feature blocks (versioned)
+│   ├── README.md                        # Block authoring guide
+│   ├── auth/
+│   │   ├── clerk/                       # Clerk JWKS + <ClerkProvider> + middleware
+│   │   └── jwt/                         # Self-hosted HS256 + bcrypt + useIdentity()
+│   └── storage/
+│       └── r2/                          # Cloudflare R2 presigned uploads
 │
 ├── templates/
 │   └── base-react-fastapi/               # Canonical base template (Copier-managed)
@@ -420,9 +573,98 @@ The Build page is a real Monaco IDE rather than a wizard:
 - `test_coder_tools_*.py` — One file per tool family (files, commands, patch, codegen, search/AST, validators, git/review)
 - `test_coder_agent.py` — End-to-end agent loop with mocked LLM
 - `test_coder_validator_loop.py` — Per-task validator retry behaviour
-- `test_sandbox_*.py` — Compose generation, port allocation, git ops, manager lifecycle
+- `test_sandbox_compose.py` — Compose YAML generation from params
+- `test_sandbox_ports.py` — Port allocation + free + collision prevention
+- `test_sandbox_git_ops.py` — head_sha, commit_all, reset_hard
+- `test_sandbox_manager.py` — Full LocalSandboxManager lifecycle
 - `test_health.py` — Health/readiness endpoint integration tests
 - `test_llm_router.py` — LiteLLM router cascade ordering
+- `test_api_files.py` — File tree + read endpoints
+- `test_services_projects.py` — Project CRUD service layer
+
+---
+
+## Key Functions
+
+Quick reference for the most important entry points across all modules.
+
+### Agents
+
+| Function / Class | Module | Description |
+|---|---|---|
+| `run_spec_agent(prompt, qa_context?)` | `agents/spec_agent.py` | Pydantic AI agent → `AppSpec`. Bounded 2 retries, `reasoning_effort=low`. |
+| `run_planner_agent(spec, blocks)` | `agents/planner_agent.py` | Pydantic AI agent → `BuildPlan` (ordered FileOp DAG). |
+| `resolve_blocks_for_spec(spec)` | `agents/planner_agent.py` | Deterministic map of `spec.auth` + `integrations` → block list. Zero LLM cost. |
+| `make_coder_agent()` | `agents/coder/agent.py` | Creates the Pydantic AI coder agent with all tools registered. |
+| `run_task_with_validators(prompt, deps, ...)` | `agents/coder/validator_loop.py` | Inner loop: run agent → validate → retry (max 3). Returns `TaskResult`. |
+
+### Build Graph (LangGraph)
+
+| Function / Class | Module | Description |
+|---|---|---|
+| `build_graph(checkpointer?)` | `agents/build/graph.py` | Compiles the `StateGraph`: `init_node → task_node loop → END`. |
+| `init_node(state, runtime)` | `agents/build/graph.py` | Topologically sorts `plan.ops`, stamps `task_order` on state. |
+| `task_node(state, runtime)` | `agents/build/graph.py` | Runs one task via `run_task_with_validators`; handles `interrupt()` for human review. |
+| `route_after_task(state)` | `agents/build/graph.py` | Conditional edge: `failed?` → END, `all done?` → END, else → loop. |
+| `topological_order(plan)` | `agents/build/topo.py` | Kahn's algorithm on `FileOp.depends_on` edges → execution order. |
+| `run_build(project_id, plan, spec, ...)` | `agents/build/runner.py` | High-level orchestrator: scaffold → graph.ainvoke → finalise. |
+
+### Coder Agent Tools
+
+| Tool | Module | Description |
+|---|---|---|
+| `list_files(path?, glob?)` | `tools/files.py` | Recursive listing of workspace files. |
+| `read_file(path, start_line?, end_line?)` | `tools/files.py` | Read file contents with optional line range. |
+| `write_file(path, content)` | `tools/files.py` | Create a new file (refuses to overwrite existing). |
+| `apply_patch(path, unified_diff)` | `tools/patch.py` | Apply unified diff to existing file (preferred for edits). |
+| `run_command(binary, args, cwd_subdir?, timeout_s?)` | `tools/commands.py` | Execute allow-listed commands (`alembic`, `pytest`, `ruff`, `mypy`, `npm`, `tsc`, `eslint`, `vitest`, `uv`, `npx playwright`). |
+| `search_code(query, k?)` | `tools/search.py` | Regex search across workspace files. |
+| `ast_summary(path)` | `tools/search.py` | Class/function/import summary of a Python or TS file. |
+| `run_validators(targets?)` | `tools/validators.py` | Run ruff + mypy + pytest (Python) and tsc + eslint + vitest (frontend). |
+| `openapi_export()` | `tools/codegen.py` | Export `openapi.json` from live FastAPI app. |
+| `regenerate_client()` | `tools/codegen.py` | Run `@hey-api/openapi-ts` → typed TS client + TanStack Query hooks. |
+| `alembic_autogenerate(message)` | `tools/codegen.py` | Auto-generate Alembic migration from ORM diff. |
+| `git_commit(message)` | `tools/git.py` | Stage all + commit with given message. |
+| `request_human_review(question, options)` | `tools/review.py` | Raises `HumanReviewRequired` → LangGraph `interrupt()`. |
+
+### Scaffold
+
+| Function / Class | Module | Description |
+|---|---|---|
+| `scaffold_project(spec, blocks, catalogue, ...)` | `scaffold/scaffolder.py` | Copier render + block overlay + anchor patches + git init → `ScaffoldReport`. |
+| `load_catalogue(blocks_dir)` | `scaffold/blocks.py` | Discovers blocks at startup, validates manifests → `BlockCatalogue`. |
+| `build_answers(spec, ...)` | `scaffold/answer_builder.py` | Converts `AppSpec` into Copier template variables. |
+
+### Sandbox
+
+| Function / Class | Module | Description |
+|---|---|---|
+| `LocalSandboxManager.create(project_id, spec, blocks, ...)` | `sandboxes/manager.py` | Scaffold workspace, allocate ports, render compose, write state. |
+| `LocalSandboxManager.boot(handle)` | `sandboxes/manager.py` | `docker compose up -d --wait` → `SandboxStatus.RUNNING`. |
+| `LocalSandboxManager.archive(handle)` | `sandboxes/manager.py` | `docker compose down` → containers gone, disk intact. |
+| `LocalSandboxManager.resume(handle)` | `sandboxes/manager.py` | Re-allocate ports if needed, bring stack back up. |
+| `LocalSandboxManager.exec(handle, service, cmd)` | `sandboxes/manager.py` | Run command inside a named container (used by validators). |
+| `render_alloy_compose(params)` | `sandboxes/compose.py` | Generate per-project `compose.alloy.yml`. |
+| `ProbingPortAllocator.allocate(reserved?)` | `sandboxes/ports.py` | Find a free host port in the configured range. |
+| `head_sha(workspace)` / `reset_hard(workspace, sha)` | `sandboxes/git_ops.py` | Git snapshot + rollback operations. |
+
+### Services
+
+| Function / Class | Module | Description |
+|---|---|---|
+| `finalise_build(deps)` | `services/finalise.py` | Post-build pipeline: alembic → openapi → ts-client → smoke → `FinaliseReport`. |
+| `ensure_workspace_for_build(project, spec, plan)` | `services/workspaces.py` | Resume existing sandbox or scaffold a new one. |
+| `create_project(session, tenant_id, prompt)` | `services/projects.py` | Create project + first spec version. |
+
+### Frontend Hooks
+
+| Hook | Module | Description |
+|---|---|---|
+| `useBuildStream()` | `hooks/useBuildStream.ts` | State machine: `idle→proposing_spec→editing_spec→planning→building→needs_review→done`. Exposes `proposeSpec`, `saveSpec`, `generatePlan`, `runBuild`, `resumeBuild`. |
+| `useFileTree(projectId)` | `hooks/useFileTree.ts` | Fetches workspace file tree, tracks expansion state. |
+| `useEditorTabs()` | `hooks/useEditorTabs.ts` | Tab open/close/select state for Monaco editor. |
+| `useSandboxPreview(projectId)` | `hooks/useSandboxPreview.ts` | Polls sandbox status, exposes `previewUrl` when running. |
+| `useApi()` | `lib/api.ts` | Fetch wrapper with Clerk token injection. `request<T>()`, `stream()`, `streamJson<S,R>()`. |
 
 ---
 
