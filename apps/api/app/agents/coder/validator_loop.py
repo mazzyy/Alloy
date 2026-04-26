@@ -180,7 +180,12 @@ _GIVEUP_RATIONALISATION_FRAGMENTS: tuple[str, ...] = (
     "hunk mismatches",
     "no hunks found",
     "found nothing to commit",
-    "nothing to commit",
+    # NB: "nothing to commit" by itself is too broad — it false-positives
+    # on legitimate intentional no-op summaries like "TanStack Router
+    # already registered the new page automatically. Nothing to commit
+    # for this task." The narrower "found nothing to commit" still
+    # catches the real failure shape ("the commit attempt found nothing
+    # to commit") without the false positive.
     "i will need to retry",
     "i'll need to retry",
     "will need to retry with",
@@ -667,14 +672,29 @@ async def run_task_with_validators(
                     attempts=attempts,
                     final_report=report,
                 )
+            # Mirror the pre-validator-branch prose shape so the
+            # assertions and tool-sequence guidance stay aligned across
+            # both rationalisation branches. The 10th-regression test
+            # (`test_giveup_rationalisation_retry_prompt_forbids_prose`)
+            # pins the exact phrases below — they appear in BOTH
+            # branches so the agent gets identical recovery framing
+            # regardless of whether touched_paths happens to be empty.
             current_prompt = (
                 f"Attempt {attempt_idx + 1}/{max_attempts} — your "
-                f"previous summary admitted non-action (matched the "
-                f"giveup phrase {rationalisation!r}) even though the "
-                f"validators ran cleanly. The validator pass is "
-                f"meaningless if the intended edits were not made.\n"
+                f"previous summary admitted non-action and your "
+                f"previous turn produced ZERO file edits but your "
+                f"summary claimed success (matched the giveup phrase "
+                f"{rationalisation!r}). The validators ran cleanly, "
+                f"but the validator pass is meaningless if the "
+                f"intended edits were not made.\n"
                 "\n"
-                "Make the actual changes the task requires this turn. "
+                "**Your next response MUST start with a tool call, "
+                "not prose.** Do not explain what you are about to "
+                "do, do not ask clarifying questions — issue the "
+                "tool call. The response shape that ends this retry "
+                "is `read_file` → `apply_patch`/`write_file` → "
+                "`git_commit`, with no narration in between.\n"
+                "\n"
                 "If you previously committed a checkpoint with no "
                 "real edits, that commit does NOT count as task "
                 "completion — re-run the planned writes (`apply_patch` "
